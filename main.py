@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api.v1 import analyze, scenarios, deals
+from app.api.v1 import analyze, scenarios, deals, export  # <-- ADD export
 
 app = FastAPI(
     title="FlipForge API",
@@ -9,6 +9,9 @@ app = FastAPI(
 app.include_router(analyze.router, prefix="/api/v1/analyze", tags=["Analyze"])
 app.include_router(scenarios.router, prefix="/api/v1/scenarios", tags=["Scenarios"])
 app.include_router(deals.router, prefix="/api/v1/deals", tags=["Deals"])
+
+# NEW: PDF Export
+app.include_router(export.router, prefix="/api/v1/export", tags=["Export"])
 
 @app.get("/")
 def root():
