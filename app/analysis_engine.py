@@ -1,31 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict, Any
-
-from app.verdict_engine import evaluate_verdict, outputs_allowed
+from typing import List, Tuple
 
 from .models import (
     AnalyzeRequest,
     AnalyzeResponse,
+    Breakpoints,
+    RehabReality,
     RiskFlag,
     StressTestScenario,
     Verdict,
     Strategy,
-    RehabReality,
-    Breakpoints,
 )
-
-# ✅ NEW: Narrative Generator (backend-first voice)
-from app.narratives.narrative_generator import NarrativeGenerator
-
-
-# -----------------------
-# Verdict Engine v1 constants (locked)
-# -----------------------
-V1_MIN_PROFIT = 30000.0
-V1_MIN_MARGIN = 0.15
-V1_MILD_STRESS_ORDER = ("Base", "ARV -5%", "Rehab +10%", "Hold +2 mo")
 
 # -----------------------
 # Helpers / core math
@@ -109,15 +96,18 @@ def compute_max_safe_offer(req: AnalyzeRequest) -> float:
     """
     required_margin = float(req.required_profit_margin_pct or 0.0)
 
+    # Upper bound can't exceed ARV, but even ARV could be too high.
     hi = float(req.arv)
     lo = 0.0
 
+    # If even at purchase=0 we can't meet margin, return 0.
     m0 = compute_base_metrics(req, purchase_override=0.0)
     if m0.total_project_cost <= 0:
         return 0.0
     if m0.net_profit < 0 or m0.profit_pct < required_margin:
         return 0.0
 
+    # Binary search
     for _ in range(45):
         mid = (lo + hi) / 2.0
         m = compute_base_metrics(req, purchase_override=mid)
@@ -127,95 +117,15 @@ def compute_max_safe_offer(req: AnalyzeRequest) -> float:
         else:
             hi = mid
 
+    # Round to nearest $100 for sanity
     return round(lo / 100.0) * 100.0
-
-
-# -----------------------
-# Rehab Reality v1
-# -----------------------
-
-def evaluate_rehab_reality(req: AnalyzeRequest) -> RehabReality:
-    purchase = float(req.purchase_price)
-    rehab = float(req.rehab_budget)
-
-    rehab_ratio = (rehab / purchase) if purchase > 0 else 0.0
-
-    # Buckets
-    if rehab_ratio <= 0.15:
-        severity = "LIGHT"
-        contingency_pct = 0.05
-        added_holding = 0
-        confidence_penalty = 0
-    elif rehab_ratio <= 0.30:
-        severity = "MEDIUM"
-        contingency_pct = 0.10
-        added_holding = 1
-        confidence_penalty = 5
-    elif rehab_ratio <= 0.50:
-        severity = "HEAVY"
-        contingency_pct = 0.20
-        added_holding = 2
-        confidence_penalty = 10
-    else:
-        severity = "EXTREME"
-        contingency_pct = 0.30
-        added_holding = 3
-        confidence_penalty = 20
-
-    return RehabReality(
-        rehab_ratio=float(rehab_ratio),
-        severity=severity,
-        contingency_pct=float(contingency_pct),
-        added_holding_months=int(added_holding),
-        confidence_penalty=int(confidence_penalty),
-    )
-
-
-def rehab_reality_flags(rr: RehabReality) -> List[RiskFlag]:
-    flags: List[RiskFlag] = []
-
-    if rr.severity == "MEDIUM":
-        flags.append(RiskFlag(
-            code="rehab_margin_compression",
-            label="Rehab level may compress margins (overruns/time risk)",
-            severity="moderate",
-        ))
-    elif rr.severity == "HEAVY":
-        flags.append(RiskFlag(
-            code="heavy_rehab_vs_purchase",
-            label="Heavy rehab relative to purchase price",
-            severity="moderate",
-        ))
-        flags.append(RiskFlag(
-            code="rehab_margin_compression",
-            label="High overrun/timeline sensitivity at this rehab level",
-            severity="moderate",
-        ))
-    elif rr.severity == "EXTREME":
-        flags.append(RiskFlag(
-            code="heavy_rehab_vs_purchase",
-            label="Heavy rehab relative to purchase price",
-            severity="critical",
-        ))
-        flags.append(RiskFlag(
-            code="extreme_rehab_risk",
-            label="Extreme rehab execution risk",
-            severity="critical",
-        ))
-        flags.append(RiskFlag(
-            code="rehab_margin_compression",
-            label="Deal is highly sensitive to rehab overruns and delays",
-            severity="critical",
-        ))
-
-    return flags
 
 
 # -----------------------
 # Scoring + flags
 # -----------------------
 
-def build_risk_flags(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float, rr: RehabReality) -> Tuple[List[str], List[RiskFlag]]:
+def build_risk_flags(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float) -> Tuple[List[str], List[RiskFlag]]:
     flags: List[RiskFlag] = []
 
     # Thin spread / low margin
@@ -230,16 +140,13 @@ def build_risk_flags(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float,
     elif m.net_profit < 25000:
         flags.append(RiskFlag(code="low_profit", label="Low net profit", severity="moderate"))
 
-    # Existing heavy rehab flag (keep for backward compatibility)
+    # Heavy rehab vs purchase
     if req.purchase_price > 0:
         rehab_ratio = req.rehab_budget / req.purchase_price
         if rehab_ratio >= 0.60:
             flags.append(RiskFlag(code="heavy_rehab", label="Heavy rehab vs purchase price", severity="critical"))
         elif rehab_ratio >= 0.35:
             flags.append(RiskFlag(code="heavy_rehab", label="Heavy rehab vs purchase price", severity="moderate"))
-
-    # Rehab Reality (new)
-    flags.extend(rehab_reality_flags(rr))
 
     # Over ask vs MAO (proxy using purchase_price as "offer")
     if req.purchase_price > max_safe_offer and max_safe_offer > 0:
@@ -262,15 +169,24 @@ def build_risk_flags(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float,
 
 
 def compute_flip_score(req: AnalyzeRequest, m: BaseMetrics) -> int:
+    # Weighted simple score: margin, profit, hold time
     score = 50
-    score += int(clamp(m.profit_pct * 400, 0, 35))
-    score += int(clamp(m.net_profit / 1000.0, -30, 25))
+
+    # Profit pct contribution
+    score += int(clamp(m.profit_pct * 400, 0, 35))  # 0.10 => +40 but capped
+
+    # Net profit contribution
+    score += int(clamp(m.net_profit / 1000.0, -30, 25))  # +25 at 25k
+
+    # Holding months penalty
     hm = int(req.holding_months or 0)
     score -= int(clamp((hm - 6) * 2, 0, 15))
+
     return int(clamp(score, 0, 100))
 
 
 def compute_brrrr_score(req: AnalyzeRequest, m: BaseMetrics) -> int:
+    # Requires rent input for a real BRRRR read
     if req.est_monthly_rent is None:
         return 40
 
@@ -279,15 +195,19 @@ def compute_brrrr_score(req: AnalyzeRequest, m: BaseMetrics) -> int:
     annual_rent = float(req.est_monthly_rent) * 12.0
     rent_to_cost = (annual_rent / all_in) if all_in > 0 else 0.0
 
-    score += int(clamp(rent_to_cost * 300, 0, 40))
+    # Rent-to-cost is big for BRRRR
+    score += int(clamp(rent_to_cost * 300, 0, 40))  # 0.10 => +30
+    # Still needs to not be a dog financially
     score += int(clamp(m.net_profit / 2000.0, -20, 15))
     return int(clamp(score, 0, 100))
 
 
 def compute_wholesale_score(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float) -> int:
+    # Wholesale is about spread between MAO and purchase
     score = 45
     spread = max_safe_offer - req.purchase_price
     score += int(clamp(spread / 1000.0, -30, 35))
+    # Penalize huge rehab because harder to assign
     if req.purchase_price > 0:
         rehab_ratio = req.rehab_budget / req.purchase_price
         score -= int(clamp(rehab_ratio * 40, 0, 20))
@@ -302,15 +222,9 @@ def pick_best_strategy(flip: int, brrrr: int, wholesale: int) -> Strategy:
     return "wholesale"
 
 
-def compute_confidence_score(
-    req: AnalyzeRequest,
-    m: BaseMetrics,
-    flags: List[RiskFlag],
-    stress: List[StressTestScenario],
-    rr: RehabReality,
-) -> int:
+def compute_confidence_score(req: AnalyzeRequest, m: BaseMetrics, flags: List[RiskFlag], stress: List[StressTestScenario]) -> int:
     # R1 margin strength
-    r1 = clamp(m.profit_pct * 500, 0, 100)
+    r1 = clamp(m.profit_pct * 500, 0, 100)  # 0.20 => 100
 
     # R2 stress robustness: count how many stress verdicts are not PASS
     if not stress:
@@ -319,7 +233,7 @@ def compute_confidence_score(
         ok = sum(1 for s in stress if s.verdict != "PASS")
         r2 = (ok / len(stress)) * 100.0
 
-    # R4 risk penalty (flags) + rehab reality penalty
+    # R4 risk penalty
     penalty = 0.0
     for f in flags:
         if f.severity == "critical":
@@ -328,43 +242,23 @@ def compute_confidence_score(
             penalty += 10
         else:
             penalty += 4
-
-    # Rehab reality confidence penalty (explicit, deterministic)
-    penalty += float(rr.confidence_penalty)
-
     r4 = clamp(100.0 - penalty, 0, 100)
 
+    # Combine (simple weighted avg)
     confidence = (0.45 * r1) + (0.30 * r2) + (0.25 * r4)
     return int(round(clamp(confidence, 0, 100)))
 
 
-def build_stress_tests(req: AnalyzeRequest, rr: RehabReality) -> List[StressTestScenario]:
-    base_hold = int(req.holding_months or 0)
+def build_stress_tests(req: AnalyzeRequest) -> List[StressTestScenario]:
+    base = compute_base_metrics(req)
 
     scenarios = [
-        ("Base", 1.00, 1.00, base_hold),
-        ("ARV -5%", 0.95, 1.00, base_hold),
-        ("ARV -10%", 0.90, 1.00, base_hold),
-
-        # Rehab Reality stress tests (v1)
-        ("Rehab +10%", 1.00, 1.10, base_hold),
+        ("Base", 1.00, 1.00, int(req.holding_months or 0)),
+        ("ARV -5%", 0.95, 1.00, int(req.holding_months or 0)),
+        ("ARV -10%", 0.90, 1.00, int(req.holding_months or 0)),
+        ("Rehab +15%", 1.00, 1.15, int(req.holding_months or 0)),
+        ("Hold +2 mo", 1.00, 1.00, int(req.holding_months or 0) + 2),
     ]
-
-    # Only include +20% if heavy/extreme
-    if rr.severity in ("HEAVY", "EXTREME"):
-        scenarios.append(("Rehab +20%", 1.00, 1.20, base_hold))
-
-    # Timeline risk scenario (added holding months)
-    if rr.added_holding_months > 0:
-        scenarios.append((
-            f"Rehab Reality (Hold +{rr.added_holding_months} mo)",
-            1.00,
-            1.00,
-            base_hold + rr.added_holding_months
-        ))
-
-    # Keep your existing generic timeline stress
-    scenarios.append(("Hold +2 mo", 1.00, 1.00, base_hold + 2))
 
     out: List[StressTestScenario] = []
     for name, arv_mult, rehab_mult, hold_mo in scenarios:
@@ -382,7 +276,7 @@ def build_stress_tests(req: AnalyzeRequest, rr: RehabReality) -> List[StressTest
             region=req.region,
         )
         m = compute_base_metrics(stressed)
-
+        # Verdict is based on stressed flip score (simple + consistent)
         score = compute_flip_score(stressed, m)
         verdict = verdict_from_score(score)
 
@@ -401,63 +295,72 @@ def build_stress_tests(req: AnalyzeRequest, rr: RehabReality) -> List[StressTest
     return out
 
 
-# -----------------------
-# Breakpoints v1
-# -----------------------
+def compute_rehab_reality(req: AnalyzeRequest) -> RehabReality:
+    """
+    Classifies rehab risk based on rehab_budget / purchase_price ratio.
+    Thresholds: LIGHT <20%, MEDIUM 20-40%, HEAVY 40-60%, EXTREME >=60%.
+    """
+    if req.purchase_price <= 0:
+        return RehabReality(
+            rehab_ratio=0.0, severity="LIGHT",
+            contingency_pct=0.10, added_holding_months=0, confidence_penalty=0,
+        )
 
-def _break_reason(
-    req: AnalyzeRequest,
-    scenario: StressTestScenario,
-) -> Optional[str]:
+    ratio = req.rehab_budget / req.purchase_price
+
+    if ratio < 0.20:
+        return RehabReality(
+            rehab_ratio=ratio, severity="LIGHT",
+            contingency_pct=0.10, added_holding_months=0, confidence_penalty=0,
+        )
+    if ratio < 0.40:
+        return RehabReality(
+            rehab_ratio=ratio, severity="MEDIUM",
+            contingency_pct=0.15, added_holding_months=1, confidence_penalty=5,
+        )
+    if ratio < 0.60:
+        return RehabReality(
+            rehab_ratio=ratio, severity="HEAVY",
+            contingency_pct=0.20, added_holding_months=2, confidence_penalty=10,
+        )
+    return RehabReality(
+        rehab_ratio=ratio, severity="EXTREME",
+        contingency_pct=0.25, added_holding_months=3, confidence_penalty=15,
+    )
+
+
+def compute_breakpoints(
+    req: AnalyzeRequest, stress_tests: List[StressTestScenario]
+) -> Breakpoints:
+    """
+    Derives breakpoint from the 5 built-in stress scenarios (skipping Base).
+    Finds the first non-base scenario where verdict flips to PASS.
+    Labeled preliminary — based on the existing stress test set only.
+    """
     required_margin = float(req.required_profit_margin_pct or 0.0)
-    if scenario.net_profit < 0:
-        return "NEGATIVE_PROFIT"
-    if scenario.profit_pct < required_margin:
-        return "BELOW_MARGIN"
-    if scenario.verdict == "PASS":
-        return "VERDICT_FAIL"
-    return None
+
+    for scenario in stress_tests[1:]:   # skip index 0 = "Base"
+        if scenario.verdict == "PASS":
+            if scenario.net_profit < 0:
+                reason = "NEGATIVE_PROFIT"
+            elif scenario.profit_pct < required_margin:
+                reason = "BELOW_MARGIN"
+            else:
+                reason = "VERDICT_FAIL"
+            return Breakpoints(
+                first_break_scenario=scenario.name,
+                break_reason=reason,
+                is_fragile=True,
+            )
+
+    return Breakpoints(
+        first_break_scenario=None,
+        break_reason=None,
+        is_fragile=False,
+    )
 
 
-def compute_breakpoints(req: AnalyzeRequest, stress: List[StressTestScenario]) -> Breakpoints:
-    """
-    Find the first scenario where the deal 'breaks' under an ordered mild→severe ladder.
-    """
-    if not stress:
-        return Breakpoints(first_break_scenario=None, break_reason=None, is_fragile=False)
-
-    # Map by name for fast lookup
-    by_name = {s.name: s for s in stress}
-
-    # Ordered ladder (mild → severe)
-    ordered_names: List[str] = [
-        "ARV -5%",
-        "Rehab +10%",
-        "Hold +2 mo",
-        "ARV -10%",
-        "Rehab +20%",
-    ]
-
-    # If Rehab Reality added holding months, prefer that after harsher baseline scenarios
-    for s in stress:
-        if s.name.startswith("Rehab Reality (Hold +"):
-            ordered_names.append(s.name)
-            break
-
-    # Scan in order; skip names not present
-    for name in ordered_names:
-        s = by_name.get(name)
-        if not s:
-            continue
-        reason = _break_reason(req, s)
-        if reason is not None:
-            is_fragile = name in ("ARV -5%", "Rehab +10%", "Hold +2 mo")
-            return Breakpoints(first_break_scenario=name, break_reason=reason, is_fragile=is_fragile)
-
-    return Breakpoints(first_break_scenario=None, break_reason=None, is_fragile=False)
-
-
-def build_notes(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float, rr: RehabReality, bp: Breakpoints) -> List[str]:
+def build_notes(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float) -> List[str]:
     notes: List[str] = []
 
     if m.net_profit <= 0:
@@ -466,22 +369,6 @@ def build_notes(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float, rr: 
         notes.append("Margin is below your required threshold. Consider lowering offer or tightening rehab assumptions.")
     else:
         notes.append("Numbers pencil if assumptions are real. Verify ARV and rehab before moving.")
-
-    # Rehab Reality note (single clean line)
-    pct = rr.rehab_ratio * 100.0
-    if rr.severity == "MEDIUM":
-        notes.append(f"Rehab is ~{pct:.0f}% of purchase price (MEDIUM). Budget for overruns and timeline risk.")
-    elif rr.severity == "HEAVY":
-        notes.append(f"Rehab is ~{pct:.0f}% of purchase price (HEAVY). Deal is sensitive to overruns and delays.")
-    elif rr.severity == "EXTREME":
-        notes.append(f"Rehab is ~{pct:.0f}% of purchase price (EXTREME). High execution risk—stress tests matter.")
-    # LIGHT: no extra note (keeps noise low)
-
-    # Breakpoint note (new, single line)
-    if bp.first_break_scenario:
-        notes.append(f"Breakpoint: Deal fails under {bp.first_break_scenario}.")
-    else:
-        notes.append("Breakpoint: Deal holds up through mild stress.")
 
     if req.purchase_price > max_safe_offer and max_safe_offer > 0:
         notes.append(f"Your purchase price is above Max Safe Offer (~${max_safe_offer:,.0f}).")
@@ -495,12 +382,10 @@ def build_notes(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float, rr: 
 
 
 def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
-    rr = evaluate_rehab_reality(req)
-
     max_safe_offer = compute_max_safe_offer(req)
     base = compute_base_metrics(req)
 
-    stress = build_stress_tests(req, rr)
+    stress = build_stress_tests(req)
 
     flip_score = compute_flip_score(req, base)
     brrrr_score = compute_brrrr_score(req, base)
@@ -508,79 +393,29 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
 
     best = pick_best_strategy(flip_score, brrrr_score, wholesale_score)
 
-    risk_codes, typed_flags = build_risk_flags(req, base, max_safe_offer, rr)
+    risk_codes, typed_flags = build_risk_flags(req, base, max_safe_offer)
 
     flip_verdict = verdict_from_score(flip_score)
     brrrr_verdict = verdict_from_score(brrrr_score)
     wholesale_verdict = verdict_from_score(wholesale_score)
 
+    # overall verdict based on best strategy score
     best_score = {"flip": flip_score, "brrrr": brrrr_score, "wholesale": wholesale_score}[best]
-    score_verdict = verdict_from_score(best_score)  # keep for reference/debug
+    overall_verdict = verdict_from_score(best_score)
 
-    # -----------------------
-    # Verdict Engine (v1) — TOP-LEVEL authority
-    # Build deterministic stress_results in fixed order.
-    # -----------------------
-    by_name = {s.name: s for s in stress}
+    confidence = compute_confidence_score(req, base, typed_flags, stress)
 
-    stress_results = []
-    for nm in V1_MILD_STRESS_ORDER:
-        s = by_name.get(nm)
-        if not s:
-            continue
-        stress_results.append(
-            {"name": s.name, "profit": float(s.net_profit), "margin": float(s.profit_pct)}
-        )
-
-    # Safety: if something went wrong and we have zero stresses, fall back to Base metrics
-    if not stress_results:
-        stress_results = [{"name": "Base", "profit": float(base.net_profit), "margin": float(base.profit_pct)}]
-
-    overall_verdict, verdict_reason = evaluate_verdict(
-        stress_results=stress_results,
-        min_profit=V1_MIN_PROFIT,
-        min_margin=V1_MIN_MARGIN,
-    )
-    allowed = outputs_allowed(overall_verdict)
-
-    # Breakpoints (use stress tests + required margin)
-    bp = compute_breakpoints(req, stress)
-
-    # If fragile, add one clean flag (typed + code list)
-    if bp.is_fragile:
-        fragile = RiskFlag(
-            code="fragile_deal",
-            label="Deal breaks under mild stress",
-            severity="moderate",
-        )
-        typed_flags.append(fragile)
-        risk_codes.append(fragile.code)
-
-    confidence = compute_confidence_score(req, base, typed_flags, stress, rr)
-
+    # Helper metrics
     rent_to_cost_ratio = None
     if req.est_monthly_rent is not None and base.total_project_cost > 0:
         rent_to_cost_ratio = (float(req.est_monthly_rent) * 12.0) / base.total_project_cost
 
     assignment_spread = max_safe_offer - req.purchase_price if max_safe_offer > 0 else None
 
-    notes = build_notes(req, base, max_safe_offer, rr, bp)
+    notes = build_notes(req, base, max_safe_offer)
 
-    # ✅ NEW: Narratives (backend-first) - wrapped for safety
-    try:
-        narratives: Dict[str, Any] = NarrativeGenerator.build(
-            base=base,  # ✅ pass BaseMetrics into narratives
-            overall_verdict=overall_verdict,
-            confidence_score=confidence,
-            best_strategy=best,
-            rehab_reality=rr,
-            breakpoints=bp,
-            typed_flags=typed_flags,
-            stress_tests=stress,
-        )
-    except Exception as e:
-        # Narrative generation failed - don't crash the analysis
-        narratives = None
+    rehab_reality = compute_rehab_reality(req)
+    breakpoints = compute_breakpoints(req, stress)
 
     return AnalyzeResponse(
         total_project_cost=base.total_project_cost,
@@ -594,17 +429,10 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
         brrrr_score=brrrr_score,
         wholesale_score=wholesale_score,
         best_strategy=best,
-
         overall_verdict=overall_verdict,
-        verdict_reason=verdict_reason,
-        allowed_outputs=allowed,
-
         flip_verdict=flip_verdict,
         brrrr_verdict=brrrr_verdict,
         wholesale_verdict=wholesale_verdict,
-
-        rehab_reality=rr,
-        breakpoints=bp,
 
         confidence_score=confidence,
         risk_flags=risk_codes,
@@ -615,6 +443,6 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
         rent_to_cost_ratio=rent_to_cost_ratio,
         assignment_spread=assignment_spread,
 
-        # ✅ NEW: include voice
-        narratives=narratives,
+        rehab_reality=rehab_reality,
+        breakpoints=breakpoints,
     )

@@ -1,23 +1,47 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Literal
-from enum import Enum
 from pydantic import BaseModel, Field
 
-# -------------------------
-# Type aliases
-# -------------------------
 
 Severity = Literal["critical", "moderate", "mild"]
 Verdict = Literal["BUY", "CONDITIONAL", "PASS"]
 Strategy = Literal["flip", "brrrr", "wholesale"]
+Confidence = Literal["HIGH", "MEDIUM", "LOW", "MISSING"]
 RehabSeverity = Literal["LIGHT", "MEDIUM", "HEAVY", "EXTREME"]
-
 BreakpointReason = Literal["NEGATIVE_PROFIT", "BELOW_MARGIN", "VERDICT_FAIL"]
 
-# -------------------------
-# Request
-# -------------------------
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+class DataPoint(BaseModel):
+    """A scraped or user-supplied value with extraction confidence metadata."""
+    value: Optional[float] = None
+    confidence: Confidence = "MISSING"
+    source: Optional[str] = None
+    evidence: Optional[str] = None
+
+
+class RehabReality(BaseModel):
+    """Derived rehab risk classification based on rehab/purchase ratio."""
+    rehab_ratio: float
+    severity: RehabSeverity
+    contingency_pct: float        # suggested cost buffer (e.g. 0.15 = 15%)
+    added_holding_months: int     # expected timeline slip
+    confidence_penalty: int       # score penalty points
+
+
+class Breakpoints(BaseModel):
+    """
+    Derived from stress tests: identifies the first scenario that kills the deal.
+    Labeled as preliminary — based on the 5 built-in stress scenarios.
+    """
+    first_break_scenario: Optional[str]   # e.g. "ARV -10%" or None if deal holds
+    break_reason: Optional[BreakpointReason]
+    is_fragile: bool                       # True if ANY stress scenario = PASS
+
 
 class AnalyzeRequest(BaseModel):
     purchase_price: float = Field(..., gt=0)
@@ -37,10 +61,6 @@ class AnalyzeRequest(BaseModel):
     region: Optional[str] = None
 
 
-# -------------------------
-# Core sub-models
-# -------------------------
-
 class RiskFlag(BaseModel):
     code: str
     label: str
@@ -58,24 +78,6 @@ class StressTestScenario(BaseModel):
     verdict: Verdict
 
 
-class RehabReality(BaseModel):
-    rehab_ratio: float = Field(..., ge=0)
-    severity: RehabSeverity
-    contingency_pct: float = Field(..., ge=0, le=1.0)       # decimal (0.10 = 10%)
-    added_holding_months: int = Field(..., ge=0, le=12)
-    confidence_penalty: int = Field(..., ge=0, le=50)
-
-
-class Breakpoints(BaseModel):
-    first_break_scenario: Optional[str] = None
-    break_reason: Optional[BreakpointReason] = None
-    is_fragile: bool = False
-
-
-# -------------------------
-# Response
-# -------------------------
-
 class AnalyzeResponse(BaseModel):
     # Core numbers
     total_project_cost: float
@@ -90,21 +92,10 @@ class AnalyzeResponse(BaseModel):
     brrrr_score: int
     wholesale_score: int
     best_strategy: Strategy
-
-    # Final verdict + integrity gate (v1)
     overall_verdict: Verdict
-    verdict_reason: str
-    allowed_outputs: Dict[str, bool]
-
     flip_verdict: Verdict
     brrrr_verdict: Verdict
     wholesale_verdict: Verdict
-
-    # Rehab Reality (v1)
-    rehab_reality: RehabReality
-
-    # Breakpoints (v1)
-    breakpoints: Breakpoints
 
     # Extras
     confidence_score: int
@@ -117,53 +108,37 @@ class AnalyzeResponse(BaseModel):
     rent_to_cost_ratio: Optional[float] = None
     assignment_spread: Optional[float] = None
 
-    # ✅ NEW: Narratives (backend-first voice)
-    narratives: Optional[Dict[str, Any]] = None
+    # Derived enrichment (always populated by analyze_deal)
+    rehab_reality: Optional[RehabReality] = None
+    breakpoints: Optional[Breakpoints] = None
 
 
-# =========================================================
-# ✅ ADDITIVE: DraftDeal ingestion models (Pre-Spine object)
-# =========================================================
-
-class ConfidenceLevel(str, Enum):
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-    MISSING = "MISSING"
-
-
-class DataPoint(BaseModel):
-    value: Optional[float] = None
-    confidence: ConfidenceLevel = ConfidenceLevel.MISSING
-    source: Optional[str] = None     # "Zillow" | "Redfin" | "OpenGraph" | "User" | "Heuristic"
-    evidence: Optional[str] = None   # short reason string (e.g., "og:title parse")
-
+# ---------------------------------------------------------------------------
+# Phase 2 — URL extraction + draft flow
+# ---------------------------------------------------------------------------
 
 class DraftDeal(BaseModel):
     """
-    DraftDeal sits BEFORE AnalyzeRequest.
-
-    - Adapters/extractors produce DraftDeal (best-effort).
-    - User edits DraftDeal in UI.
-    - Finalize converts DraftDeal -> AnalyzeRequest (clean).
+    Best-effort extraction from a listing URL.
+    purchase_price / arv / rehab_budget carry confidence metadata so the UI
+    can highlight what needs manual completion.
     """
-    source: str = "manual"           # "zillow" | "redfin" | "opengraph" | "manual"
+    source: str                   # "opengraph" | "SOURCE_BLOCKED" | "manual" | etc.
     url: Optional[str] = None
 
-    # Identity (optional)
     address: Optional[str] = None
     zip_code: Optional[str] = None
     region: Optional[str] = None
 
-    # Big Three (required to analyze)
-    purchase_price: DataPoint = Field(default_factory=DataPoint)
-    arv: DataPoint = Field(default_factory=DataPoint)
-    rehab_budget: DataPoint = Field(default_factory=DataPoint)
+    # Required to analyze — wrapped in DataPoint for confidence visibility
+    purchase_price: DataPoint = DataPoint()
+    arv: DataPoint = DataPoint()
+    rehab_budget: DataPoint = DataPoint()
 
     # Optional helper
-    est_monthly_rent: DataPoint = Field(default_factory=DataPoint)
+    est_monthly_rent: DataPoint = DataPoint()
 
-    # Assumptions (defaults match AnalyzeRequest defaults)
+    # Assumptions with safe defaults (match AnalyzeRequest defaults)
     closing_cost_pct: float = 0.03
     selling_cost_pct: float = 0.08
     holding_months: int = 6
@@ -171,68 +146,18 @@ class DraftDeal(BaseModel):
     loan_to_cost_pct: float = 0.90
     required_profit_margin_pct: float = 0.12
 
-    # Transparency
-    notes: List[str] = Field(default_factory=list)
-    signals: List[str] = Field(default_factory=list)
-
-
-class DraftFromUrlRequest(BaseModel):
-    url: str
+    notes: List[str] = []
+    signals: List[str] = []
 
 
 class DraftFromUrlResponse(BaseModel):
     draft: DraftDeal
 
 
-class DraftFinalizeError(Exception):
-    """Raised when required fields are missing/invalid during draft finalization."""
-    def __init__(self, missing_fields: List[str]):
-        super().__init__("Missing required fields: " + ", ".join(missing_fields))
-        self.missing_fields = missing_fields
+# ---------------------------------------------------------------------------
+# Lender report export
+# ---------------------------------------------------------------------------
 
-
-def finalize_draft_to_request(d: DraftDeal) -> AnalyzeRequest:
-    """
-    Gatekeeper bridge:
-    - Requires purchase_price, arv, rehab_budget (values must be present and valid)
-    - Strips confidence metadata
-    - Returns a clean AnalyzeRequest for the underwriting engine
-    """
-    missing: List[str] = []
-
-    # Defensive: in case any DataPoint object itself is None (shouldn't happen, but safe)
-    pp = d.purchase_price.value if d.purchase_price else None
-    arv = d.arv.value if d.arv else None
-    rehab = d.rehab_budget.value if d.rehab_budget else None
-
-    # Validate core inputs
-    if pp is None or pp <= 0:
-        missing.append("purchase_price")
-    if arv is None or arv <= 0:
-        missing.append("arv")
-    if rehab is None or rehab < 0:
-        missing.append("rehab_budget")
-
-    if missing:
-        raise DraftFinalizeError(missing)
-
-    rent = None
-    if d.est_monthly_rent and d.est_monthly_rent.value is not None:
-        rent = float(d.est_monthly_rent.value)
-
-    return AnalyzeRequest(
-        purchase_price=float(pp),
-        arv=float(arv),
-        rehab_budget=float(rehab),
-
-        closing_cost_pct=float(d.closing_cost_pct),
-        selling_cost_pct=float(d.selling_cost_pct),
-        holding_months=int(d.holding_months),
-
-        annual_interest_rate=float(d.annual_interest_rate),
-        loan_to_cost_pct=float(d.loan_to_cost_pct),
-        required_profit_margin_pct=float(d.required_profit_margin_pct),
-
-        est_monthly_rent=rent,
-        region=d.region,
-    )
+class LenderReportRequest(BaseModel):
+    result: AnalyzeResponse
+    meta: Dict[str, Any] = {}
