@@ -13,6 +13,7 @@ from .models import (
     Verdict,
     Strategy,
 )
+from .verdict_engine import outputs_allowed
 
 # -----------------------
 # Helpers / core math
@@ -403,6 +404,8 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
     best_score = {"flip": flip_score, "brrrr": brrrr_score, "wholesale": wholesale_score}[best]
     overall_verdict = verdict_from_score(best_score)
 
+    allowed = outputs_allowed(overall_verdict)
+
     confidence = compute_confidence_score(req, base, typed_flags, stress)
 
     # Helper metrics
@@ -445,4 +448,6 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
 
         rehab_reality=rehab_reality,
         breakpoints=breakpoints,
+
+        allowed_outputs=allowed,
     )

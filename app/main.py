@@ -10,10 +10,13 @@ from .models import (
     DraftDeal,
     DraftFromUrlResponse,
     LenderReportRequest,
+    NegotiationScriptRequest,
+    NegotiationScriptResponse,
 )
 from .analysis_engine import analyze_deal
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
+from .services.script_service import generate_negotiation_script
 
 app = FastAPI(title="FlipForge API", version="0.1.0")
 
@@ -116,3 +119,18 @@ def export_lender_report(body: LenderReportRequest):
             "Content-Disposition": 'attachment; filename="flipforge_lender_report.pdf"'
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Negotiation Script generation
+# ---------------------------------------------------------------------------
+
+@app.post("/api/generate/negotiation-script", response_model=NegotiationScriptResponse)
+def generate_negotiation_script_endpoint(body: NegotiationScriptRequest):
+    """
+    Deterministic negotiation script from AnalyzeResponse + optional deal context.
+    No LLM. Uses max_safe_offer, net_profit, total_project_cost, typed_flags.
+    Integrity Gate: caller should only invoke when allowed_outputs.negotiation_script is True.
+    """
+    script = generate_negotiation_script(body)
+    return NegotiationScriptResponse(negotiation_script=script)

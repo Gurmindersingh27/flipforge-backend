@@ -112,6 +112,9 @@ class AnalyzeResponse(BaseModel):
     rehab_reality: Optional[RehabReality] = None
     breakpoints: Optional[Breakpoints] = None
 
+    # Integrity Gate — which institutional outputs are allowed for this verdict
+    allowed_outputs: Optional[Dict[str, bool]] = None
+
 
 # ---------------------------------------------------------------------------
 # Phase 2 — URL extraction + draft flow
@@ -161,3 +164,15 @@ class DraftFromUrlResponse(BaseModel):
 class LenderReportRequest(BaseModel):
     result: AnalyzeResponse
     meta: Dict[str, Any] = {}
+
+
+class NegotiationScriptRequest(BaseModel):
+    result: AnalyzeResponse
+    seller_ask_price: Optional[float] = None
+    property_address: Optional[str] = None
+    buyer_name: Optional[str] = None
+    seller_name: Optional[str] = None
+
+
+class NegotiationScriptResponse(BaseModel):
+    negotiation_script: str
