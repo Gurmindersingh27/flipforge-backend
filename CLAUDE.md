@@ -73,6 +73,7 @@ src/
 - `POST /api/draft-from-url` → `draftFromUrl()`
 - `POST /api/finalize-and-analyze` → `finalizeAndAnalyze()` (handles 422 missing_fields)
 - `POST /api/export/lender-report` → PDF export
+- `POST /api/generate/negotiation-script` → `generateNegotiationScript()`
 
 **Key types (src/lib/types.ts):**
 - `AnalyzeRequest` / `AnalyzeResponse`
@@ -111,6 +112,7 @@ app/
   services/
     url_service.py             # URL scraping → DraftDeal
     pdf_service.py             # Lender report PDF generation (production risk — see below)
+    script_service.py          # deterministic negotiation script generator
     analyze_service.py
     deal_service.py
     scenario_service.py
@@ -134,6 +136,7 @@ POST /api/analyze                  # Core deal analysis — AnalyzeRequest schem
 POST /api/draft-from-url           # Scrape listing URL → DraftDeal
 POST /api/finalize-and-analyze     # DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     # AnalyzeResponse → PDF bytes
+POST /api/generate/negotiation-script  # NegotiationScriptRequest → NegotiationScriptResponse
 ```
 
 **Run locally:**
