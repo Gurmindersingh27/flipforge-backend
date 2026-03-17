@@ -4,39 +4,46 @@
 ---
 
 ## Last Updated
-2026-03-17
+2026-03-17 (end of auth + deals persistence session)
 
 ---
 
 ## 1. Current Phase & Progress
 
-**Current phase:** Backend deployment confirmed live. Next: wire frontend to backend and validate full flow.
+**Current phase:** Auth + saved deals persistence complete. All three deals endpoints live. Next: Open Deal (frontend loads saved deal back into analyzer).
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
 - [x] `/api/draft-from-url` working
 - [x] `/api/finalize-and-analyze` working (stress tests, breakpoints, rehab_reality, narratives)
 - [x] NarrativeGenerator fixed — accepts base metrics
-- [x] Frontend MVP exists — App.tsx, AnalysisResult.tsx, api.ts, types.ts all in place
 - [x] CLAUDE.md added to both repos
 - [x] PROJECT_STATE.md added to both repos
-- [x] Backend audited — requirements.txt clean, all 5 routes present, start command correct
+- [x] Backend audited — requirements.txt clean, all routes present, start command correct
 - [x] Render backend deployed successfully
 - [x] Live backend URL confirmed: https://flipforge-backend.onrender.com
-- [x] GET /api/health confirmed live and returning {"status":"ok"}
+- [x] GET /api/health confirmed live
 - [x] POST /api/analyze confirmed working in prod
 - [x] POST /api/export/lender-report confirmed returning application/pdf in prod
 - [x] Full frontend → backend → PDF pipeline validated end-to-end
-- [x] Draft Deal editor: assumption fields (holding_months, annual_interest_rate, loan_to_cost_pct) exposed as editable inputs
-- [x] Draft Deal editor: extraction notes (draft.notes, draft.signals) displayed in panel
+- [x] Clerk JWT verification via JWKS implemented (app/auth.py)
+- [x] `get_current_user_id` FastAPI dependency — verifies Bearer token, returns Clerk user_id
+- [x] `preload_jwks()` made startup-safe — lazy-load fallback if Clerk unreachable at boot
+- [x] SavedDeal DB model added (app/db/models/saved_deal.py)
+- [x] POST /api/deals/save — authenticated, persists deal with user_id
+- [x] GET /api/deals — authenticated, returns all deals for user newest first
+- [x] GET /api/deals/{id} — authenticated, returns single deal (404 if not owned by user)
+- [x] init_db() called at startup to ensure tables exist
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
-- [x] Polish assumption input display: convert interest rate / LTC to percentage display
+- [ ] Move production DB from SQLite to Postgres (ephemeral on Render today)
+- [ ] Delete deal endpoint
+- [ ] Edit deal endpoint
 
 ### Next Session Goal
-1. Polish assumption input display (show percentages instead of decimals)
-2. Tighten CORS from * to https://flipforge-frontend.vercel.app
+No backend work needed for the next task (Open Deal is frontend-only).
+If backend work is needed: see Section 12 (Next Task).
 
 ---
 
@@ -47,7 +54,7 @@
 | Frontend | Gurmindersingh27/flipforge-frontend | Vercel |
 | Backend | Gurmindersingh27/flipforge-backend | Render.com |
 
-Active dev branch (both repos): `claude/review-project-docs-Qquyh`
+Active dev branch (both repos): `claude/flipforge-dev-setup-FhRuA`
 Never push to `main` or `master` directly.
 
 ---
@@ -118,7 +125,16 @@ POST /api/analyze                  ← AnalyzeRequest → AnalyzeResponse (SCHEM
 POST /api/draft-from-url           ← { url } → DraftFromUrlResponse
 POST /api/finalize-and-analyze     ← DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     ← LenderReportRequest → PDF bytes
+POST /api/deals/save               ← SaveDealRequest → SavedDealResponse (🔐 Clerk JWT required)
+GET  /api/deals                    ← [] SavedDealResponse for current user (🔐 Clerk JWT required)
+GET  /api/deals/{id}               ← SavedDealResponse by id (🔐 Clerk JWT required, 404 if not owned)
 ```
+
+### Auth (app/auth.py)
+- `get_current_user_id(token)` — FastAPI dependency, verifies Clerk JWT via JWKS
+- `preload_jwks()` — called at startup; lazy-load fallback if Clerk unreachable at boot
+- Public routes (`/api/analyze`, `/api/draft-from-url`, `/api/finalize-and-analyze`, `/api/export/lender-report`) remain unauthenticated
+- Clerk env var required: `CLERK_JWKS_URL` (set on Render)
 
 ### Analysis Engine Logic (analysis_engine.py)
 - `compute_base_metrics()` — all core financials
@@ -214,17 +230,21 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 
 ## 7. Commit History
 
-**Frontend:**
+**Backend (recent, newest first):**
 ```
-22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
-ad39f86  Fix meta bridge + lender report + address override
-e307963  Restore UI styles
-23826a4  FlipForge frontend MVP
+1838408  fix: make JWKS preload startup-safe with lazy-load fallback
+621fb06  feat: add Clerk auth + saved deals persistence layer
+f0a5032  Merge pull request #2
+c995435  docs: tick off Polish assumption input display in PROJECT_STATE.md
+7f307e2  docs: bring PROJECT_STATE.md up to date
 ```
 
-**Backend:**
+**Frontend (recent, newest first):**
 ```
-741c4c2  FlipForge backend MVP
+b5f058c  fix: fall back to draft_input.address when address column is null
+9a60727  feat: gate analyzer behind Clerk auth, add SignUpButton
+5bec63f  fix: disable Open button in DealsPage until location.state is wired up
+666e37b  feat: add Clerk auth + saved deals frontend
 ```
 
 ---
@@ -235,11 +255,61 @@ e307963  Restore UI styles
 - `app/core/analysis_engine.py` exists alongside `app/analysis_engine.py` — confirm which is imported before editing either
 - `app/core/config.py` imports pydantic-settings but is dead code — not in active import chain, do not add pydantic-settings to requirements.txt
 - CORS is wide open (`*`) — needs tightening to Vercel domain before production hardening
-- No auth system yet
-- Database models exist (SQLite/SQLAlchemy) but may not be wired into active routes
 - Zillow/Redfin block URL scraping (SOURCE_BLOCKED) — known limitation, not a bug
 - PDF generation must use in-memory bytes in production — disk writes will fail on Render
 - Render free tier cold starts — first request after inactivity may take 50+ seconds
+
+---
+
+## 9. Database / Persistence State
+
+- **ORM:** SQLAlchemy
+- **DB layer:** `app/db/session.py` reads `settings.DATABASE_URL` (from `app/core/config.py`)
+- **Default:** `sqlite:///./flipforge.db` — used locally and in production unless overridden
+- **Configurable:** Yes — set `DATABASE_URL` env var on Render to switch to Postgres
+- **Production today:** SQLite on Render's ephemeral filesystem. ⚠️ Data will be lost on each deploy/restart. Move to Postgres before treating saved deals as durable.
+- **Schema managed by:** `app/db/init_db.py` (`init_db()` called at startup via `on_startup`)
+- **SavedDeal model:** `app/db/models/saved_deal.py` — columns: id, user_id, address, draft_input (JSON), analysis_result (JSON), created_at
+
+---
+
+## 10. Explicitly Unchanged / Protected Systems
+
+The following were NOT modified and must remain untouched:
+
+- `AnalyzeRequest` schema — frozen, no field additions or removals
+- `app/analysis_engine.py` — core underwriting math, do not rewrite
+- `POST /api/analyze` — route, request shape, and response shape unchanged
+- `POST /api/draft-from-url` — unchanged
+- `POST /api/finalize-and-analyze` — unchanged
+- Core scoring engine (verdict thresholds, stress test logic, breakpoints, rehab reality) — unchanged
+
+---
+
+## 11. Known Limitations / Open Gaps (backend perspective)
+
+- **Delete deal endpoint not implemented** — no `DELETE /api/deals/{id}`
+- **Edit deal endpoint not implemented** — no `PUT /api/deals/{id}`
+- **SQLite on Render is ephemeral** — all saved deals lost on redeploy; move to Postgres for production durability
+- **CORS not tightened** — still `allow_origins=["*"]`
+- **address column normalization** — `SavedDeal.address` is populated at save-time from `draft_input.address` if available; older records may have null address (frontend has display fallback)
+
+---
+
+## 12. Next Recommended Task
+
+**Open Deal** — load a saved deal back into the analyzer. This is frontend-only; no backend changes needed. See frontend PROJECT_STATE.md Section 12 for full scope.
+
+---
+
+## 13. Workflow / Guardrails (preserve across sessions)
+
+1. **Load repo skills first** before doing any work
+2. **Plan → File Diff → Approval → Implementation** — no exceptions
+3. **Additive changes only** — do not rename fields, remove routes, or change response shapes
+4. **No silent dependency installs** — get explicit approval before touching requirements.txt
+5. **No schema changes without approval** — AnalyzeRequest is frozen; any other schema change needs PM sign-off
+6. **Do not refactor working systems** — if it works, leave it alone
 
 ---
 

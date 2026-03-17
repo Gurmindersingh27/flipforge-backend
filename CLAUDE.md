@@ -134,7 +134,16 @@ POST /api/analyze                  # Core deal analysis — AnalyzeRequest schem
 POST /api/draft-from-url           # Scrape listing URL → DraftDeal
 POST /api/finalize-and-analyze     # DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     # AnalyzeResponse → PDF bytes
+POST /api/deals/save               # 🔐 Save a deal (Clerk JWT required)
+GET  /api/deals                    # 🔐 List saved deals for user (Clerk JWT required)
+GET  /api/deals/{id}               # 🔐 Get single saved deal (Clerk JWT required)
 ```
+
+**Auth (app/auth.py):**
+- `get_current_user_id` — FastAPI dependency, verifies Clerk Bearer JWT via JWKS
+- `preload_jwks()` — called at startup, lazy-load fallback if Clerk unreachable at boot
+- Requires env var: `CLERK_JWKS_URL`
+- Public analysis routes remain unauthenticated
 
 **Run locally:**
 ```
@@ -172,25 +181,31 @@ Do not touch pdf_service.py without explicitly flagging this risk first.
 ## Deployment State
 
 - **Backend:** Render.com (render.yaml present in repo)
+  - Live: https://flipforge-backend.onrender.com
 - **Frontend:** Vercel (linked to GitHub)
-- **CORS:** Currently `allow_origins=["*"]` — tighten to Vercel domain once deployed
-- **Env var:** Frontend reads `VITE_API_BASE_URL` — must be set to live Render URL on Vercel
+  - Live: https://flipforge-frontend.vercel.app
+- **CORS:** Currently `allow_origins=["*"]` — tighten to Vercel domain before production hardening
+- **Env vars (backend, set on Render):**
+  - `CLERK_JWKS_URL` — required for JWT verification
+  - `DATABASE_URL` — optional; defaults to `sqlite:///./flipforge.db` if not set
+- **DB in production:** SQLite (ephemeral on Render). ⚠️ Data lost on redeploy. Set `DATABASE_URL` to a Postgres URL for durable persistence.
 
 ---
 
 ## Commit History
 
-**Frontend:**
+**Backend (recent, newest first):**
 ```
-22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
-ad39f86  Fix meta bridge + lender report + address override
-e307963  Restore UI styles
-23826a4  FlipForge frontend MVP
+1838408  fix: make JWKS preload startup-safe with lazy-load fallback
+621fb06  feat: add Clerk auth + saved deals persistence layer
 ```
 
-**Backend:**
+**Frontend (recent, newest first):**
 ```
-741c4c2  FlipForge backend MVP
+b5f058c  fix: fall back to draft_input.address when address column is null
+9a60727  feat: gate analyzer behind Clerk auth, add SignUpButton
+5bec63f  fix: disable Open button in DealsPage until location.state is wired up
+666e37b  feat: add Clerk auth + saved deals frontend
 ```
 
 ---
