@@ -32,7 +32,7 @@
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
-- [ ] Polish assumption input display: convert interest rate / LTC to percentage display
+- [x] Polish assumption input display: convert interest rate / LTC to percentage display
 
 ### Next Session Goal
 1. Polish assumption input display (show percentages instead of decimals)
