@@ -4,7 +4,7 @@
 ---
 
 ## Last Updated
-2026-03-13
+2026-03-17
 
 ---
 
@@ -24,20 +24,19 @@
 - [x] Render backend deployed successfully
 - [x] Live backend URL confirmed: https://flipforge-backend.onrender.com
 - [x] GET /api/health confirmed live and returning {"status":"ok"}
+- [x] POST /api/analyze confirmed working in prod
+- [x] POST /api/export/lender-report confirmed returning application/pdf in prod
+- [x] Full frontend → backend → PDF pipeline validated end-to-end
+- [x] Draft Deal editor: assumption fields (holding_months, annual_interest_rate, loan_to_cost_pct) exposed as editable inputs
+- [x] Draft Deal editor: extraction notes (draft.notes, draft.signals) displayed in panel
 
 ### Not Done
-- [ ] POST /api/analyze confirmed working in prod
-- [ ] POST /api/export/lender-report confirmed returning application/pdf in prod
-- [ ] VITE_API_BASE_URL set to live Render URL on Vercel
-- [ ] CORS tightened to Vercel domain
-- [ ] Frontend Draft Deal editor UI (do not start until full prod flow confirmed)
+- [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
+- [ ] Polish assumption input display: convert interest rate / LTC to percentage display
 
 ### Next Session Goal
-1. Set VITE_API_BASE_URL in Vercel to https://flipforge-backend.onrender.com
-2. Redeploy frontend on Vercel
-3. Test /api/analyze from browser
-4. Test /api/export/lender-report from browser — confirm PDF downloads
-5. Tighten CORS to Vercel domain only
+1. Polish assumption input display (show percentages instead of decimals)
+2. Tighten CORS from * to https://flipforge-frontend.vercel.app
 
 ---
 
@@ -48,7 +47,7 @@
 | Frontend | Gurmindersingh27/flipforge-frontend | Vercel |
 | Backend | Gurmindersingh27/flipforge-backend | Render.com |
 
-Active dev branch (both repos): `claude/understand-system-uz7Uw`
+Active dev branch (both repos): `claude/review-project-docs-Qquyh`
 Never push to `main` or `master` directly.
 
 ---
