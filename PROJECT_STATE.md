@@ -31,8 +31,7 @@
 - [x] Draft Deal editor: extraction notes (draft.notes, draft.signals) displayed in panel
 
 ### Not Done
-- [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
-- [x] Polish assumption input display: convert interest rate / LTC to percentage display
+None remaining.
 
 ### Next Session Goal
 1. Polish assumption input display (show percentages instead of decimals)
