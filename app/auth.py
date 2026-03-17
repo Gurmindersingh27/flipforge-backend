@@ -32,12 +32,14 @@ _bearer = HTTPBearer()
 
 
 def preload_jwks() -> None:
-    """Fetch and cache Clerk's JWKS at app startup. Raises on failure."""
+    """
+    Attempt to fetch and cache Clerk's JWKS at startup.
+    Never raises — a failure here is non-fatal. The first authenticated
+    /api/deals/* request will retry via _load_jwks().
+    """
     global _jwks
     jwks_url = os.environ.get("CLERK_JWKS_URL", "").strip()
     if not jwks_url:
-        # Warn but don't crash — deals endpoints will 503 if called, but
-        # analysis endpoints continue to work with no auth requirement.
         print(
             "WARNING: CLERK_JWKS_URL is not set. "
             "/api/deals/* endpoints will return 503 until this is configured."
@@ -49,7 +51,29 @@ def preload_jwks() -> None:
         _jwks = resp.json()
         print(f"Clerk JWKS loaded ({len(_jwks.get('keys', []))} key(s))")
     except Exception as exc:
-        print(f"WARNING: Failed to load Clerk JWKS from {jwks_url}: {exc}")
+        print(f"WARNING: Failed to preload Clerk JWKS from {jwks_url}: {exc}. "
+              "Will retry on first authenticated request.")
+
+
+def _load_jwks() -> dict | None:
+    """
+    Lazy-load JWKS on demand. Called by get_current_user_id() when
+    _jwks is None (startup fetch was skipped or failed).
+    Returns the JWKS dict on success, None if URL is unset or fetch fails.
+    """
+    global _jwks
+    jwks_url = os.environ.get("CLERK_JWKS_URL", "").strip()
+    if not jwks_url:
+        return None
+    try:
+        resp = httpx.get(jwks_url, timeout=10)
+        resp.raise_for_status()
+        _jwks = resp.json()
+        print(f"Clerk JWKS lazy-loaded ({len(_jwks.get('keys', []))} key(s))")
+        return _jwks
+    except Exception as exc:
+        print(f"WARNING: Clerk JWKS lazy-load failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +87,10 @@ def get_current_user_id(
     Verify the Clerk session JWT and return the user_id (sub claim).
 
     Raises HTTP 401 on invalid/expired token.
-    Raises HTTP 503 if JWKS has not been loaded (misconfigured deployment).
+    Raises HTTP 503 if JWKS cannot be loaded (CLERK_JWKS_URL unset or unreachable).
     """
-    if _jwks is None:
+    jwks = _jwks or _load_jwks()
+    if jwks is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Auth service not configured (CLERK_JWKS_URL missing).",
@@ -76,7 +101,7 @@ def get_current_user_id(
         # Decode header first to extract kid, then decode + verify with JWKS.
         payload = jwt.decode(
             token,
-            _jwks,
+            jwks,
             algorithms=["RS256"],
             options={"verify_aud": False},  # Clerk JWTs use azp not aud
         )
