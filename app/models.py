@@ -176,3 +176,22 @@ class NegotiationScriptRequest(BaseModel):
 
 class NegotiationScriptResponse(BaseModel):
     negotiation_script: str
+
+
+# ---------------------------------------------------------------------------
+# Saved Deals — persistence layer
+# ---------------------------------------------------------------------------
+
+class SaveDealRequest(BaseModel):
+    address: Optional[str] = None
+    draft_input: Optional[Dict[str, Any]] = None   # serialized DraftDeal
+    analysis_result: Dict[str, Any]                # serialized AnalyzeResponse
+
+
+class SavedDealResponse(BaseModel):
+    id: int
+    user_id: str
+    address: Optional[str] = None
+    draft_input: Optional[Dict[str, Any]] = None
+    analysis_result: Dict[str, Any]
+    created_at: str   # ISO 8601 string
