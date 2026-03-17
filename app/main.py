@@ -24,7 +24,7 @@ app = FastAPI(title="FlipForge API", version="0.1.0")
 # In production, restrict this to your Vercel domain.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=["https://flipforge-frontend.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
