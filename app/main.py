@@ -36,10 +36,13 @@ def on_startup():
 
 
 # IMPORTANT: CORS so your frontend can call it.
-# In production, restrict this to your Vercel domain.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=[
+        "https://flipforge-frontend.vercel.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
