@@ -84,6 +84,15 @@ def _fmt_pct(v: Any, decimals: int = 1) -> str:
         return "—"
 
 
+def _safe_pct(v: Any, decimals: int = 1) -> str:
+    """Format a value already expressed as a percentage (e.g. 10 → '10.0%').
+    Returns '—' for None or non-numeric values."""
+    try:
+        return f"{float(v):.{decimals}f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 # ---------------------------------------------------------------------------
 # Paragraph style factory
 # ---------------------------------------------------------------------------
@@ -245,9 +254,9 @@ def generate_lender_report(result: AnalyzeResponse, meta: Dict[str, Any]) -> byt
     story.append(Paragraph("Financial Assumptions", s["section"]))
 
     story.append(_kv_table([
-        ("Holding Months",       str(meta.get("holding_months", "—"))),
-        ("Annual Interest Rate", f"{meta.get('interest_rate_pct', '—')}%"),
-        ("Loan-to-Cost (LTC)",   f"{meta.get('ltc_pct', '—')}%"),
+        ("Holding Months",       str(meta.get("holding_months") or "—")),
+        ("Annual Interest Rate", _safe_pct(meta.get("interest_rate_pct"))),
+        ("Loan-to-Cost (LTC)",   _safe_pct(meta.get("ltc_pct"))),
     ]))
     story.append(Spacer(1, 8))
 
