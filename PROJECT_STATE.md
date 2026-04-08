@@ -4,13 +4,13 @@
 ---
 
 ## Last Updated
-2026-03-17
+2026-04-08
 
 ---
 
 ## 1. Current Phase & Progress
 
-**Current phase:** Backend deployment confirmed live. Next: wire frontend to backend and validate full flow.
+**Current phase:** Product polished and ready for first user validation. Frontend UX complete, PDF bug fixed. Zero market contact is the primary risk.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
@@ -29,14 +29,20 @@
 - [x] Full frontend → backend → PDF pipeline validated end-to-end
 - [x] Draft Deal editor: assumption fields (holding_months, annual_interest_rate, loan_to_cost_pct) exposed as editable inputs
 - [x] Draft Deal editor: extraction notes (draft.notes, draft.signals) displayed in panel
+- [x] Frontend deployed on Vercel: https://flipforge-frontend.vercel.app
+- [x] View Saved Deal — /deal/:id (read-only)
+- [x] Resume UX polish (conditional header, specific 422 messaging, assumption input highlighting)
+- [x] Results page clarity (max_safe_offer, confidence_score, risk flags, Integrity Gate)
+- [x] Saved Deals page clarity (max_safe_offer column, verdict badges, Resume action)
+- [x] Deal page clarity (max_safe_offer in header, duplicate buttons removed, allowed_outputs fixed)
+- [x] Legacy Manual Analyze hidden by default behind subtle toggle link
+- [x] PDF bug fix — None/None% no longer rendered for holding_months, annual_interest_rate, loan_to_cost_pct (fa30d10, app/services/pdf_service.py)
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
-- [x] Polish assumption input display: convert interest rate / LTC to percentage display
 
 ### Next Session Goal
-1. Polish assumption input display (show percentages instead of decimals)
-2. Tighten CORS from * to https://flipforge-frontend.vercel.app
+Get the product in front of a real user and capture feedback. Zero market contact is the primary risk.
 
 ---
 
@@ -47,7 +53,7 @@
 | Frontend | Gurmindersingh27/flipforge-frontend | Vercel |
 | Backend | Gurmindersingh27/flipforge-backend | Render.com |
 
-Active dev branch (both repos): `claude/review-project-docs-Qquyh`
+Active dev branch (both repos): `claude/flipforge-execution-setup-ICNZ2`
 Never push to `main` or `master` directly.
 
 ---
@@ -216,6 +222,11 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 
 **Frontend:**
 ```
+0c2a97a  Hide Legacy Manual Analyze section by default
+b744b2a  feat: deal page clarity — max offer, remove duplicate buttons, fix allowed_outputs
+18fe47e  feat: saved deals page clarity
+07fb928  feat: results page clarity polish
+9616d4e  feat: polish Resume UX — conditional header and specific validation messaging
 22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
 ad39f86  Fix meta bridge + lender report + address override
 e307963  Restore UI styles
@@ -224,6 +235,7 @@ e307963  Restore UI styles
 
 **Backend:**
 ```
+fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 741c4c2  FlipForge backend MVP
 ```
 
