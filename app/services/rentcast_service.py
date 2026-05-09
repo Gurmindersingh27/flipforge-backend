@@ -12,6 +12,9 @@ from ..models import EnrichAddressResponse, PropertyFacts, RentSignal, ValueSign
 _BASE = "https://api.rentcast.io/v1"
 _TIMEOUT = 10.0
 
+# Fields used to score which property record has the richest data.
+_SCORE_FIELDS = ("squareFootage", "bedrooms", "bathrooms", "yearBuilt", "lastSalePrice")
+
 
 def _get_api_key() -> str:
     key = os.environ.get("RENTCAST_API_KEY", "").strip()
@@ -40,24 +43,66 @@ def _handle_response(resp: httpx.Response, label: str) -> Any:
 
 def _extract_object(data: Any) -> dict:
     """
-    Safely extract a single property dict regardless of response shape.
+    Safely extract a single dict from AVM endpoint responses.
 
-    RentCast shapes observed in the wild:
-      - {"value": [{...}], "Count": 1}  ← /v1/properties
-      - [{...}]                          ← bare list
-      - {...}                            ← flat object ← /v1/avm/value, /v1/avm/rent/long-term
+    RentCast shapes:
+      - {"value": [{...}], "Count": N}  — unwrap and take first
+      - [{...}]                          — bare list, take first
+      - {...}                            — flat object (avm/value, avm/rent/long-term)
 
-    Returns an empty dict if the data is missing, empty, or an unexpected type.
+    Returns {} if data is missing, empty, or unexpected type.
     """
     if isinstance(data, dict):
         inner = data.get("value")
         if isinstance(inner, list):
             return inner[0] if inner else {}
-        # Flat dict — use as-is (avm/value and avm/rent/long-term shapes)
         return data
     if isinstance(data, list):
         return data[0] if data else {}
     return {}
+
+
+def _score_record(record: dict) -> tuple:
+    """Score a property record by data completeness, then square footage."""
+    non_null = sum(1 for f in _SCORE_FIELDS if record.get(f) is not None)
+    sqft = record.get("squareFootage") or 0
+    return (non_null, sqft)
+
+
+def _select_best_property(data: Any, address: str) -> dict:
+    """
+    Select the best property record from a /v1/properties response.
+
+    1. Unwrap the value list.
+    2. Filter to records whose formattedAddress matches the input address
+       (case-insensitive, stripped). Fall back to all records if none match.
+    3. Among candidates, prefer the record with the most non-null values
+       across squareFootage/bedrooms/bathrooms/yearBuilt/lastSalePrice.
+       Ties broken by largest squareFootage, then position.
+    """
+    if isinstance(data, dict):
+        inner = data.get("value")
+        records = inner if isinstance(inner, list) else ([data] if data else [])
+    elif isinstance(data, list):
+        records = data
+    else:
+        return {}
+
+    if not records:
+        return {}
+
+    normalized = address.strip().lower()
+    matches = [
+        r for r in records
+        if isinstance(r, dict)
+        and (r.get("formattedAddress") or "").strip().lower() == normalized
+    ]
+    candidates = matches if matches else [r for r in records if isinstance(r, dict)]
+
+    if not candidates:
+        return {}
+
+    return max(candidates, key=_score_record)
 
 
 def enrich_address(address: str) -> EnrichAddressResponse:
@@ -70,7 +115,7 @@ def enrich_address(address: str) -> EnrichAddressResponse:
         value_resp = client.get(f"{_BASE}/avm/value?address={encoded}&compCount=5", headers=headers)
         rent_resp = client.get(f"{_BASE}/avm/rent/long-term?address={encoded}&compCount=5", headers=headers)
 
-    prop = _extract_object(_handle_response(prop_resp, "properties"))
+    prop = _select_best_property(_handle_response(prop_resp, "properties"), address)
     value = _extract_object(_handle_response(value_resp, "avm/value"))
     rent = _extract_object(_handle_response(rent_resp, "avm/rent/long-term"))
 
