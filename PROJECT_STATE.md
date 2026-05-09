@@ -4,7 +4,7 @@
 ---
 
 ## Last Updated
-2026-04-08
+2026-05-09
 
 ---
 
@@ -278,3 +278,42 @@ Do not make any code changes yet.
 ```
 
 5. Wait for confirmation, then give one goal.
+
+---
+
+## Session 2026-05-09: Fixed Finalize & Analyze Button Visibility
+
+**Bug:** Finalize & Analyze button in Address draft flow appeared dark/invisible when enabled
+
+**Root cause:** Vite boilerplate leftover in src/index.css:
+button { background-color: #1a1a1a; }
+
+Un-layered global CSS overrides Tailwind v4 @layer utilities, so
+bg-[#E8C547] class was present but not rendering.
+
+**Diagnostic method:** Added runtime panel (PR #35) showing:
+- canFinalize: true
+- btn.disabled: false
+- computed.backgroundColor: rgb(26,26,26) (not gold)
+
+Proved CSS override, not state/logic bug.
+
+**Fixes:**
+- PR #34: RentCast estimate Number() coercion (arv/rent stored as numbers)
+- PR #36: Removed global button rules from index.css
+- PR #37: Cleanup diagnostic code (PR #35 accidentally merged)
+
+**Verified working:**
+- Address lookup → draft → Finalize & Analyze = bright gold, clickable
+- Resume Deal → same gold button
+- Diagnostic panel removed from production
+
+**Known cosmetic issue (not blocking):**
+Legacy manual analyzer "Analyze Deal" button still gray - separate
+styling, not same bug. Can be updated separately if desired.
+
+**Lesson:** Runtime inspection > source speculation. Diagnostic panel
+exposed real bug in 5 min after 45 min of symptom-chasing.
+
+**Note:** RentCast quota exhausted (50 calls/month free tier).
+Future: add caching/rate-limit.
