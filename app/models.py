@@ -195,3 +195,44 @@ class SavedDealResponse(BaseModel):
     draft_input: Optional[Dict[str, Any]] = None
     analysis_result: Dict[str, Any]
     created_at: str   # ISO 8601 string
+
+
+# ---------------------------------------------------------------------------
+# Address enrichment — RentCast passthrough
+# ---------------------------------------------------------------------------
+
+class EnrichAddressRequest(BaseModel):
+    address: str = Field(..., min_length=1)
+
+    def clean_address(self) -> str:
+        return self.address.strip()
+
+
+class PropertyFacts(BaseModel):
+    formatted_address: Optional[str] = None
+    property_type: Optional[str] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[float] = None
+    square_footage: Optional[int] = None
+    lot_size: Optional[int] = None
+    year_built: Optional[int] = None
+    last_sale_date: Optional[str] = None
+    last_sale_price: Optional[float] = None
+
+
+class ValueSignal(BaseModel):
+    estimate: Optional[float] = None
+    low: Optional[float] = None
+    high: Optional[float] = None
+
+
+class RentSignal(BaseModel):
+    estimate: Optional[float] = None
+    low: Optional[float] = None
+    high: Optional[float] = None
+
+
+class EnrichAddressResponse(BaseModel):
+    property_facts: PropertyFacts
+    value_signal: ValueSignal
+    rent_signal: RentSignal

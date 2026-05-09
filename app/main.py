@@ -10,6 +10,8 @@ from .models import (
     AnalyzeResponse,
     DraftDeal,
     DraftFromUrlResponse,
+    EnrichAddressRequest,
+    EnrichAddressResponse,
     LenderReportRequest,
     NegotiationScriptRequest,
     NegotiationScriptResponse,
@@ -20,6 +22,7 @@ from .analysis_engine import analyze_deal
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
+from .services.rentcast_service import enrich_address
 from .db.init_db import init_db
 from .db.session import get_db
 from .db.models.saved_deal import SavedDeal
@@ -152,6 +155,23 @@ def generate_negotiation_script_endpoint(body: NegotiationScriptRequest):
     """
     script = generate_negotiation_script(body)
     return NegotiationScriptResponse(negotiation_script=script)
+
+
+# ---------------------------------------------------------------------------
+# Address enrichment — RentCast passthrough (no deal logic)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/enrich-address", response_model=EnrichAddressResponse)
+def enrich_address_endpoint(body: EnrichAddressRequest):
+    """
+    Look up property facts, AVM value estimate, and rent estimate from RentCast.
+    Returns raw data signals only — no ARV labels, no verdict logic.
+    Requires RENTCAST_API_KEY to be set in environment.
+    """
+    address = body.clean_address()
+    if not address:
+        raise HTTPException(status_code=422, detail="address must not be blank.")
+    return enrich_address(address)
 
 
 # ---------------------------------------------------------------------------
