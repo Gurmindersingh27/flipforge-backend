@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from urllib.parse import quote
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
@@ -22,7 +23,7 @@ def _get_api_key() -> str:
     return key
 
 
-def _handle_response(resp: httpx.Response, label: str) -> dict:
+def _handle_response(resp: httpx.Response, label: str) -> Any:
     if resp.status_code == 404:
         return {}
     if resp.status_code == 401:
@@ -37,6 +38,28 @@ def _handle_response(resp: httpx.Response, label: str) -> dict:
     return resp.json()
 
 
+def _extract_object(data: Any) -> dict:
+    """
+    Safely extract a single property dict regardless of response shape.
+
+    RentCast shapes observed in the wild:
+      - {"value": [{...}], "Count": 1}  ← /v1/properties
+      - [{...}]                          ← bare list
+      - {...}                            ← flat object ← /v1/avm/value, /v1/avm/rent/long-term
+
+    Returns an empty dict if the data is missing, empty, or an unexpected type.
+    """
+    if isinstance(data, dict):
+        inner = data.get("value")
+        if isinstance(inner, list):
+            return inner[0] if inner else {}
+        # Flat dict — use as-is (avm/value and avm/rent/long-term shapes)
+        return data
+    if isinstance(data, list):
+        return data[0] if data else {}
+    return {}
+
+
 def enrich_address(address: str) -> EnrichAddressResponse:
     api_key = _get_api_key()
     encoded = quote(address)
@@ -47,9 +70,9 @@ def enrich_address(address: str) -> EnrichAddressResponse:
         value_resp = client.get(f"{_BASE}/avm/value?address={encoded}&compCount=5", headers=headers)
         rent_resp = client.get(f"{_BASE}/avm/rent/long-term?address={encoded}&compCount=5", headers=headers)
 
-    prop = _handle_response(prop_resp, "properties")
-    value = _handle_response(value_resp, "avm/value")
-    rent = _handle_response(rent_resp, "avm/rent/long-term")
+    prop = _extract_object(_handle_response(prop_resp, "properties"))
+    value = _extract_object(_handle_response(value_resp, "avm/value"))
+    rent = _extract_object(_handle_response(rent_resp, "avm/rent/long-term"))
 
     property_facts = PropertyFacts(
         formatted_address=prop.get("formattedAddress"),
