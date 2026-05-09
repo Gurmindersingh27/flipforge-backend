@@ -10,6 +10,7 @@ Strategy = Literal["flip", "brrrr", "wholesale"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW", "MISSING"]
 RehabSeverity = Literal["LIGHT", "MEDIUM", "HEAVY", "EXTREME"]
 BreakpointReason = Literal["NEGATIVE_PROFIT", "BELOW_MARGIN", "VERDICT_FAIL"]
+ProviderStatus = Literal["cache_hit", "live_success", "quota_exhausted", "provider_unavailable"]
 
 
 # ---------------------------------------------------------------------------
@@ -236,3 +237,7 @@ class EnrichAddressResponse(BaseModel):
     property_facts: PropertyFacts
     value_signal: ValueSignal
     rent_signal: RentSignal
+    from_cache: bool = False
+    cached_at: Optional[str] = None
+    provider_status: ProviderStatus = "live_success"
+    provider_error: Optional[str] = None

@@ -158,20 +158,22 @@ def generate_negotiation_script_endpoint(body: NegotiationScriptRequest):
 
 
 # ---------------------------------------------------------------------------
-# Address enrichment — RentCast passthrough (no deal logic)
+# Address enrichment — RentCast passthrough with SQLite cache
 # ---------------------------------------------------------------------------
 
 @app.post("/api/enrich-address", response_model=EnrichAddressResponse)
-def enrich_address_endpoint(body: EnrichAddressRequest):
+def enrich_address_endpoint(body: EnrichAddressRequest, db: Session = Depends(get_db)):
     """
     Look up property facts, AVM value estimate, and rent estimate from RentCast.
     Returns raw data signals only — no ARV labels, no verdict logic.
     Requires RENTCAST_API_KEY to be set in environment.
+    Responses are cached 30 days per normalized address.
+    provider_status indicates: cache_hit | live_success | quota_exhausted | provider_unavailable.
     """
     address = body.clean_address()
     if not address:
         raise HTTPException(status_code=422, detail="address must not be blank.")
-    return enrich_address(address)
+    return enrich_address(address, db)
 
 
 # ---------------------------------------------------------------------------
