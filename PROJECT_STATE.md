@@ -4,7 +4,7 @@
 ---
 
 ## Last Updated
-2026-05-09
+2026-05-10
 
 ---
 
@@ -37,9 +37,15 @@
 - [x] Deal page clarity (max_safe_offer in header, duplicate buttons removed, allowed_outputs fixed)
 - [x] Legacy Manual Analyze hidden by default behind subtle toggle link
 - [x] PDF bug fix — None/None% no longer rendered for holding_months, annual_interest_rate, loan_to_cost_pct (fa30d10, app/services/pdf_service.py)
+- [x] RentCast address lookup cache — SQLite-backed, 30-day TTL, provider_status Literal contract (backend PR #10, frontend PR #38)
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
+- [ ] Add minimal GitHub Actions CI
+  - Backend: import/startup check for FastAPI app
+  - Frontend: TypeScript + build check (tsc --noEmit && vite build)
+  - Goal: catch import/type errors before manual PR review
+  - Not urgent, but should be done soon
 
 ### Next Session Goal
 Get the product in front of a real user and capture feedback. Zero market contact is the primary risk.
@@ -104,6 +110,7 @@ app/
   services/
     url_service.py             ← Scrapes listing URLs → DraftDeal
     pdf_service.py             ← Generates lender report PDF (ReportLab)
+    rentcast_service.py        ← RentCast enrichment + SQLite cache (30-day TTL, provider_status contract)
     analyze_service.py
     deal_service.py
     scenario_service.py
@@ -111,7 +118,7 @@ app/
   api/
     deals.py
     v1/analyze.py, deals.py, profile.py, scenarios.py
-  db/                          ← SQLite models (deal, user, analysis, scenario, investor_profile)
+  db/                          ← SQLite models (deal, user, analysis, scenario, investor_profile, rentcast_cache)
 main.py                        ← Root entry — older v1 router setup, NOT active
 render.yaml
 requirements.txt
@@ -124,6 +131,8 @@ POST /api/analyze                  ← AnalyzeRequest → AnalyzeResponse (SCHEM
 POST /api/draft-from-url           ← { url } → DraftFromUrlResponse
 POST /api/finalize-and-analyze     ← DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     ← LenderReportRequest → PDF bytes
+POST /api/enrich-address           ← { address } → EnrichAddressResponse (SQLite cache, 30d TTL)
+                                      provider_status: cache_hit | live_success | quota_exhausted | provider_unavailable
 ```
 
 ### Analysis Engine Logic (analysis_engine.py)
@@ -213,6 +222,7 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 | `Strategy` | `"flip"\|"brrrr"\|"wholesale"` | same |
 | `Confidence` | `"HIGH"\|"MEDIUM"\|"LOW"\|"MISSING"` | same |
 | `RehabSeverity` | `"LIGHT"\|"MEDIUM"\|"HEAVY"\|"EXTREME"` | same |
+| `ProviderStatus` | `"cache_hit"\|"live_success"\|"quota_exhausted"\|"provider_unavailable"` | same |
 
 **AnalyzeRequest schema is frozen. Do not modify it.**
 
@@ -222,6 +232,7 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 
 **Frontend:**
 ```
+c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
 0c2a97a  Hide Legacy Manual Analyze section by default
 b744b2a  feat: deal page clarity — max offer, remove duplicate buttons, fix allowed_outputs
 18fe47e  feat: saved deals page clarity
@@ -235,6 +246,7 @@ e307963  Restore UI styles
 
 **Backend:**
 ```
+196502b  fix: add RentCast cache and provider status handling (#10)
 fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 741c4c2  FlipForge backend MVP
 ```
@@ -252,6 +264,7 @@ fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 - Zillow/Redfin block URL scraping (SOURCE_BLOCKED) — known limitation, not a bug
 - PDF generation must use in-memory bytes in production — disk writes will fail on Render
 - Render free tier cold starts — first request after inactivity may take 50+ seconds
+- No GitHub Actions CI — import/type errors are only caught at review time
 
 ---
 
@@ -317,3 +330,38 @@ exposed real bug in 5 min after 45 min of symptom-chasing.
 
 **Note:** RentCast quota exhausted (50 calls/month free tier).
 Future: add caching/rate-limit.
+
+---
+
+## Session 2026-05-10 — RentCast caching / quota protection
+
+**Goal:** Prevent repeated RentCast API calls and protect quota during demos and early usage.
+
+**Implementation (backend PR #10, frontend PR #38):**
+- New `rentcast_cache` SQLite table — auto-created by `init_db()` on startup for the current SQLite-backed environment
+- Cache key: `address.strip().lower()` with whitespace collapsed — stable, no external hash
+- TTL: 30 days — checked on read
+- `enrich_address()` accepts optional `db: Session` — cache-aware when injected, safe without
+- `enrich_address_endpoint` injects `db: Session = Depends(get_db)`
+- Cache write only on `provider_status = "live_success"`
+
+**provider_status Literal contract:**
+- `cache_hit` — returned from SQLite cache within TTL
+- `live_success` — RentCast responded; result written to cache
+- `quota_exhausted` — RentCast returned 429; empty signals returned, not cached
+- `provider_unavailable` — any other RentCast/network failure; empty signals returned, not cached
+
+**Guardrails confirmed:**
+- `analysis_engine.py` untouched
+- `AnalyzeRequest` untouched
+- No new pip dependencies
+- Manual entry flow remains available when RentCast fails (200 + empty signals + provider_status)
+- Failed/quota responses are never written to cache
+
+**Quota note:**
+RentCast quota is currently exhausted. Do not run live `/api/enrich-address` tests without explicit approval.
+Cache will serve repeat lookups from SQLite once quota resets and first live call succeeds.
+
+**Deploy:**
+- Backend: Render.com auto-deploy triggered on main merge (commit 196502b)
+- Frontend: Vercel auto-deploy triggered on main merge (commit c5809c2)

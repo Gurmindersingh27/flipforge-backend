@@ -111,6 +111,7 @@ app/
   services/
     url_service.py             # URL scraping → DraftDeal
     pdf_service.py             # Lender report PDF generation (production risk — see below)
+    rentcast_service.py        # RentCast enrichment + SQLite cache (30-day TTL)
     analyze_service.py
     deal_service.py
     scenario_service.py
@@ -122,7 +123,7 @@ app/
       deals.py
       profile.py
       scenarios.py
-  db/                          # SQLite models (deal, user, analysis, scenario, investor_profile)
+  db/                          # SQLite models (deal, user, analysis, scenario, investor_profile, rentcast_cache)
 render.yaml                    # Render.com deployment config
 requirements.txt
 ```
@@ -134,6 +135,7 @@ POST /api/analyze                  # Core deal analysis — AnalyzeRequest schem
 POST /api/draft-from-url           # Scrape listing URL → DraftDeal
 POST /api/finalize-and-analyze     # DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     # AnalyzeResponse → PDF bytes
+POST /api/enrich-address           # { address } → EnrichAddressResponse (SQLite cache, 30d TTL)
 ```
 
 **Run locally:**
@@ -153,6 +155,7 @@ Any change to these types must be made in BOTH files simultaneously:
 | `AnalyzeResponse` | src/lib/types.ts | app/models.py |
 | `DraftDeal` | src/lib/types.ts | app/models.py |
 | `DataPoint<T>` | src/lib/types.ts | app/models.py |
+| `ProviderStatus` | src/lib/types.ts | app/models.py |
 
 **AnalyzeRequest schema is frozen. Do not touch it.**
 
@@ -182,6 +185,7 @@ Do not touch pdf_service.py without explicitly flagging this risk first.
 
 **Frontend:**
 ```
+c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse
 22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
 ad39f86  Fix meta bridge + lender report + address override
 e307963  Restore UI styles
@@ -190,6 +194,7 @@ e307963  Restore UI styles
 
 **Backend:**
 ```
+196502b  fix: add RentCast cache and provider status handling
 741c4c2  FlipForge backend MVP
 ```
 
