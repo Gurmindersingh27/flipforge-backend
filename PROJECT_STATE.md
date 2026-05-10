@@ -10,7 +10,7 @@
 
 ## 1. Current Phase & Progress
 
-**Current phase:** Product polished and ready for first user validation. Frontend UX complete, PDF bug fixed. Zero market contact is the primary risk.
+**Current phase:** Result screen deal-memo polish shipped. Product feels investor-grade. Ready for first real user.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
@@ -38,6 +38,13 @@
 - [x] Legacy Manual Analyze hidden by default behind subtle toggle link
 - [x] PDF bug fix — None/None% no longer rendered for holding_months, annual_interest_rate, loan_to_cost_pct (fa30d10, app/services/pdf_service.py)
 - [x] RentCast address lookup cache — SQLite-backed, 30-day TTL, provider_status Literal contract (backend PR #10, frontend PR #38)
+- [x] Repair Budget Builder — frontend PR #39, src/components/RepairBudgetBuilder.tsx
+  - Frontend-only. No backend changes. No schema changes.
+- [x] Result screen deal-memo polish — frontend PR #40, src/AnalysisResult.tsx
+  - Offer Gap callout (Overpay Risk / Offer Gap / Offer Cushion)
+  - "Why this verdict" now driven by backend result.notes
+  - Stress-test downgrade context added
+  - Frontend-only. No backend changes. No schema changes.
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
@@ -59,8 +66,7 @@ Get the product in front of a real user and capture feedback. Zero market contac
 | Frontend | Gurmindersingh27/flipforge-frontend | Vercel |
 | Backend | Gurmindersingh27/flipforge-backend | Render.com |
 
-Active dev branch (both repos): `claude/flipforge-execution-setup-ICNZ2`
-Never push to `main` or `master` directly.
+No active dev branch. Work on named feature branches; never push to main directly.
 
 ---
 
@@ -70,11 +76,13 @@ FlipForge is a risk-first real estate deal underwriting tool for serious investo
 - Net profit, ROI, profit margin
 - Flip / BRRRR / Wholesale scores and verdicts (BUY / CONDITIONAL / PASS)
 - Max Safe Offer (MAO)
+- Offer Gap callout comparing offer vs MAO (Overpay Risk / Offer Gap / Offer Cushion)
 - Rehab Reality classification (LIGHT / MEDIUM / HEAVY / EXTREME)
 - Stress test scenarios (ARV -5%, ARV -10%, Rehab +15%, Hold +2mo)
 - Risk flags with severity levels
 - Breakpoints (first stress scenario that kills the deal)
 - Confidence score (0-100)
+- "Why this verdict" rationale (backend notes + stress context)
 - Lender report PDF export
 
 ---
@@ -143,6 +151,7 @@ POST /api/enrich-address           ← { address } → EnrichAddressResponse (SQ
 - `compute_rehab_reality()` — ratio thresholds: <20% LIGHT, 20-40% MEDIUM, 40-60% HEAVY, >=60% EXTREME
 - `compute_breakpoints()` — finds first stress scenario that fails
 - `compute_confidence_score()` — weighted: margin strength (45%), stress robustness (30%), risk penalty (25%)
+- `build_notes()` — produces 2–3 human-readable rationale strings surfaced in frontend "Why this verdict"
 - Verdict thresholds: score >= 75 = BUY, >= 55 = CONDITIONAL, else PASS
 
 ### URL Scraping (url_service.py)
@@ -172,9 +181,10 @@ src/
   App.css / index.css         ← Global styles
   config.ts                   ← API_BASE_URL (keep separate from api.ts — do not merge)
   shield.ts                   ← Shield logic
-  AnalysisResult.tsx          ← Deal analysis results display
+  AnalysisResult.tsx          ← Deal analysis results display (Offer Gap callout, verdict rationale)
   components/
     ShieldHeader.tsx          ← Header component
+    RepairBudgetBuilder.tsx   ← Repair budget estimator (PR #39, frontend-only)
   lib/
     api.ts                    ← ALL fetch calls to backend
     types.ts                  ← ALL TypeScript types (canonical contract)
@@ -232,20 +242,23 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 
 **Frontend:**
 ```
-c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
-0c2a97a  Hide Legacy Manual Analyze section by default
-b744b2a  feat: deal page clarity — max offer, remove duplicate buttons, fix allowed_outputs
-18fe47e  feat: saved deals page clarity
-07fb928  feat: results page clarity polish
-9616d4e  feat: polish Resume UX — conditional header and specific validation messaging
-22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
-ad39f86  Fix meta bridge + lender report + address override
-e307963  Restore UI styles
-23826a4  FlipForge frontend MVP
+07654861  feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
+a46dda8   Merge pull request #39 — feat: add Repair Budget Builder
+c5809c2   fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
+0c2a97a   Hide Legacy Manual Analyze section by default
+b744b2a   feat: deal page clarity — max offer, remove duplicate buttons, fix allowed_outputs
+18fe47e   feat: saved deals page clarity
+07fb928   feat: results page clarity polish
+9616d4e   feat: polish Resume UX — conditional header and specific validation messaging
+22d97b0   Fix hardcoded API_BASE in AnalysisResult.tsx
+ad39f86   Fix meta bridge + lender report + address override
+e307963   Restore UI styles
+23826a4   FlipForge frontend MVP
 ```
 
 **Backend:**
 ```
+0eacb12  docs: update PROJECT_STATE.md and CLAUDE.md for 2026-05-10 session closeout
 196502b  fix: add RentCast cache and provider status handling (#10)
 fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 741c4c2  FlipForge backend MVP
@@ -265,6 +278,8 @@ fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 - PDF generation must use in-memory bytes in production — disk writes will fail on Render
 - Render free tier cold starts — first request after inactivity may take 50+ seconds
 - No GitHub Actions CI — import/type errors are only caught at review time
+- Offer Gap callout is silent in legacy Manual Analyze path (no meta.purchase_price) — by design
+- RentCast quota currently exhausted — do not run live /api/enrich-address without explicit approval
 
 ---
 
@@ -365,3 +380,49 @@ Cache will serve repeat lookups from SQLite once quota resets and first live cal
 **Deploy:**
 - Backend: Render.com auto-deploy triggered on main merge (commit 196502b)
 - Frontend: Vercel auto-deploy triggered on main merge (commit c5809c2)
+
+---
+
+## Session 2026-05-10 — Repair Budget Builder (frontend-only)
+
+**PR:** frontend #39 (merged, commit a46dda8)
+**Changed files:** `src/components/RepairBudgetBuilder.tsx` (new), `src/App.tsx` (+1 import, +1 JSX element)
+
+**Feature:** Self-contained repair cost estimator. 9 repair categories, Low/Mid/High estimates,
+bathroom count stepper, sqft-based flooring, contingency selector.
+"Use Mid as Rehab Budget" applies to existing rehab_budget field.
+
+**Guardrails:** No backend changes. No AnalyzeRequest changes. No types.ts changes. No analysis_engine.py changes.
+
+---
+
+## Session 2026-05-10 — Result screen deal-memo polish (frontend-only)
+
+**Branch:** `claude/deal-decision-memo`
+**PR:** frontend #40 (merged)
+**Merge commit:** `07654861`
+**Changed file:** `src/AnalysisResult.tsx` only
+
+**Features shipped:**
+
+1. **Offer Gap callout** — new colored section between Key Numbers and Verdict cards
+   - Compares `meta.purchase_price` vs `result.max_safe_offer`
+   - Overpay Risk (red): purchase_price > max_safe_offer
+   - Offer Gap (amber): within $5k under max_safe_offer
+   - Offer Cushion (green): more than $5k under max_safe_offer
+   - Silent when meta.purchase_price is absent
+
+2. **Verdict rationale** — "Why this verdict" rebuilt
+   - Uses `result.notes` (from backend `build_notes()`) as primary bullets
+   - Optional breakpoint context, optional first stress-test downgrade line
+   - Dead `verdictReason` lookup removed (field never populated by backend)
+
+3. **Notes subsection removed** — only deleted UI block
+   - Notes content moved up into "Why this verdict"
+
+**Guardrails confirmed:**
+- `analysis_engine.py` untouched — `build_notes()` was already returning good text
+- `AnalyzeRequest` untouched
+- No backend changes, no schema changes, no api.ts/types.ts changes, no RentCast calls
+
+**Build/deploy:** Vercel auto-deploy triggered on main merge.
