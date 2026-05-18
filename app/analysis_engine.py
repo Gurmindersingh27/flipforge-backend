@@ -402,7 +402,10 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
 
     # overall verdict based on best strategy score
     best_score = {"flip": flip_score, "brrrr": brrrr_score, "wholesale": wholesale_score}[best]
-    overall_verdict = verdict_from_score(best_score)
+    if base.net_profit <= 0 and req.purchase_price > max_safe_offer:
+        overall_verdict = "PASS"
+    else:
+        overall_verdict = verdict_from_score(best_score)
 
     allowed = outputs_allowed(overall_verdict)
 
