@@ -199,6 +199,63 @@ class SavedDealResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Photo Rehab Analyzer
+# ---------------------------------------------------------------------------
+
+PhotoRehabCondition = Literal["light", "medium", "heavy", "unknown"]
+PhotoRehabProviderStatus = Literal["live_success", "ai_not_configured", "ai_error", "dev_stub"]
+
+
+class RoomFinding(BaseModel):
+    area_name: str
+    detected_condition: str
+    visible_issues: List[str] = []
+    confidence: str = "low"
+    notes: Optional[str] = None
+
+
+class RehabItem(BaseModel):
+    category: str
+    severity: str
+    low: int
+    mid: int
+    high: int
+    reasoning: str = ""
+    confidence: str = "low"
+
+
+class PhotoRehabRiskFlag(BaseModel):
+    label: str
+    severity: str  # "mild" | "moderate" | "critical"
+    explanation: str = ""
+
+
+class PhotoRehabTotals(BaseModel):
+    low: int = 0
+    mid: int = 0
+    high: int = 0
+    contingency_pct: int = 0
+    subtotal_low: int = 0
+    subtotal_mid: int = 0
+    subtotal_high: int = 0
+
+
+class PhotoRehabAnalysisResponse(BaseModel):
+    overall_condition: PhotoRehabCondition = "unknown"
+    confidence_score: int = 0
+    summary: str = ""
+    rooms: List[RoomFinding] = []
+    rehab_items: List[RehabItem] = []
+    totals: PhotoRehabTotals = PhotoRehabTotals()
+    risk_flags: List[PhotoRehabRiskFlag] = []
+    missing_photo_warnings: List[str] = []
+    notes: List[str] = []
+    photos_analyzed: int = 0
+    disclaimer: str = ""
+    provider_status: PhotoRehabProviderStatus = "live_success"
+
+
+# ---------------------------------------------------------------------------
 # Address enrichment — RentCast passthrough
 # ---------------------------------------------------------------------------
 
