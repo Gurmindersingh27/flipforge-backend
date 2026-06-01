@@ -4,7 +4,7 @@
 ---
 
 ## Last Updated
-2026-05-10
+2026-06-01
 
 ---
 
@@ -45,8 +45,15 @@
   - "Why this verdict" now driven by backend result.notes
   - Stress-test downgrade context added
   - Frontend-only. No backend changes. No schema changes.
+- [x] Verdict gate fix — backend PR #11, app/analysis_engine.py
+  - overall_verdict hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer
+  - Fixes live QA mismatch where negative-profit overpay deal showed CONDITIONAL
+  - Individual strategy verdicts and BRRRR scoring unchanged
+  - No schema/model/route/frontend changes
 
 ### Not Done
+- [ ] Offer Gap QA — Amber Tight Offer state (pending)
+- [ ] Offer Gap QA — Green Offer Cushion state (pending)
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
 - [ ] Add minimal GitHub Actions CI
   - Backend: import/startup check for FastAPI app
@@ -55,7 +62,8 @@
   - Not urgent, but should be done soon
 
 ### Next Session Goal
-Get the product in front of a real user and capture feedback. Zero market contact is the primary risk.
+Complete Offer Gap visual QA — Amber Tight Offer and Green Offer Cushion states.
+Do not start new features until all three QA states are confirmed.
 
 ---
 
@@ -258,6 +266,8 @@ e307963   Restore UI styles
 
 **Backend:**
 ```
+2a6d8b0  fix: hard-fail overall_verdict to PASS when net_profit <= 0 and purchase_price > max_safe_offer (#11)
+036f36e  docs: session closeout 2026-05-10 — deal-memo polish (frontend-only)
 0eacb12  docs: update PROJECT_STATE.md and CLAUDE.md for 2026-05-10 session closeout
 196502b  fix: add RentCast cache and provider status handling (#10)
 fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
@@ -426,3 +436,50 @@ bathroom count stepper, sqft-based flooring, contingency selector.
 - No backend changes, no schema changes, no api.ts/types.ts changes, no RentCast calls
 
 **Build/deploy:** Vercel auto-deploy triggered on main merge.
+
+---
+
+## Session 2026-06-01 — Verdict gate fix (backend-only)
+
+**Branch:** `claude/review-project-state-LHSMY`
+**PR:** backend #11 (open — pending merge)
+**Commit:** `2a6d8b0`
+**Changed file:** `app/analysis_engine.py` only
+
+**Issue diagnosed:**
+Live Offer Gap QA found that a deal with negative net profit and purchase price above Max Safe Offer
+returned `overall_verdict = CONDITIONAL`. The narrative (`build_notes()`) correctly said
+"PASS unless terms change" — verdict and notes were contradictory.
+
+**Root cause:**
+`overall_verdict` was derived purely from `verdict_from_score(best_score)`. BRRRR score starts at 45
+and can reach 55+ via rent-to-cost boost alone, even on a loss-making deal. `build_notes()` uses
+an independent check (`net_profit <= 0`) — the two code paths were structurally disconnected.
+
+**Fix:**
+Hard gate added in `analyze_deal()` immediately at `overall_verdict` assignment:
+```python
+if base.net_profit <= 0 and req.purchase_price > max_safe_offer:
+    overall_verdict = "PASS"
+else:
+    overall_verdict = verdict_from_score(best_score)
+```
+
+**Production QA confirmed:**
+- Red Overpay Risk state: `overall_verdict` now shows PASS ✅
+- Offer Gap card still fires red (frontend logic unchanged) ✅
+- "Why this verdict" now agrees with PASS (notes already correct) ✅
+- Integrity Gate suppresses Lender Report and Negotiation Script for dead deal ✅
+
+**Guardrails confirmed:**
+- Individual strategy verdicts (`flip_verdict`, `brrrr_verdict`, `wholesale_verdict`) unchanged
+- BRRRR scoring unchanged
+- `best_strategy` unchanged
+- No schema/model/route changes
+- No frontend changes
+- No RentCast calls
+
+**Offer Gap QA status:**
+- Red Overpay Risk: ✅ passed
+- Amber Tight Offer: pending
+- Green Offer Cushion: pending
