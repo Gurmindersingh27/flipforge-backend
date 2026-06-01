@@ -45,15 +45,17 @@
   - "Why this verdict" now driven by backend result.notes
   - Stress-test downgrade context added
   - Frontend-only. No backend changes. No schema changes.
-- [x] Verdict gate fix — backend PR #11, app/analysis_engine.py
+- [x] Verdict gate fix — backend PR #11 (merged, live), app/analysis_engine.py
   - overall_verdict hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer
   - Fixes live QA mismatch where negative-profit overpay deal showed CONDITIONAL
   - Individual strategy verdicts and BRRRR scoring unchanged
   - No schema/model/route/frontend changes
+- [x] Offer Gap visual QA — all three states confirmed in production (2026-06-01)
+  - Red Overpay Risk ✅ (required PR #11 fix first)
+  - Amber Tight Offer ✅
+  - Green Offer Cushion ✅
 
 ### Not Done
-- [ ] Offer Gap QA — Amber Tight Offer state (pending)
-- [ ] Offer Gap QA — Green Offer Cushion state (pending)
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
 - [ ] Add minimal GitHub Actions CI
   - Backend: import/startup check for FastAPI app
@@ -62,8 +64,7 @@
   - Not urgent, but should be done soon
 
 ### Next Session Goal
-Complete Offer Gap visual QA — Amber Tight Offer and Green Offer Cushion states.
-Do not start new features until all three QA states are confirmed.
+Offer Gap QA is complete. Decide whether the product is ready for a soft demo to hard-money lenders / investors, or whether one small polish pass is needed first.
 
 ---
 
@@ -442,7 +443,7 @@ bathroom count stepper, sqft-based flooring, contingency selector.
 ## Session 2026-06-01 — Verdict gate fix (backend-only)
 
 **Branch:** `claude/review-project-state-LHSMY`
-**PR:** backend #11 (open — pending merge)
+**PR:** backend #11 (merged, confirmed live in production)
 **Commit:** `2a6d8b0`
 **Changed file:** `app/analysis_engine.py` only
 
@@ -479,7 +480,7 @@ else:
 - No frontend changes
 - No RentCast calls
 
-**Offer Gap QA status:**
-- Red Overpay Risk: ✅ passed
-- Amber Tight Offer: pending
-- Green Offer Cushion: pending
+**Offer Gap QA status — all complete:**
+- Red Overpay Risk: ✅ (required this fix; retest passed after PR #11 merge)
+- Amber Tight Offer: ✅ (purchase_price 176000 / ARV 300000 / rehab 50000)
+- Green Offer Cushion: ✅ (purchase_price 160000 / ARV 300000 / rehab 50000)
