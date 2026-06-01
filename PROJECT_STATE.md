@@ -4,13 +4,19 @@
 ---
 
 ## Last Updated
-2026-05-10
+2026-06-01
 
 ---
 
 ## 1. Current Phase & Progress
 
-**Current phase:** Result screen deal-memo polish shipped. Product feels investor-grade. Ready for first real user.
+**Current phase:** Verdict fix shipped, Offer Gap QA complete across all three states. Product is coherent enough for a soft demo.
+
+**Current product state:**
+- Input credibility: Repair Budget Builder visible in all three flows (Draft Deal, Resume Deal, Legacy Manual Analyze).
+- Output credibility: Result screen calls out overpay risk, tight offer, or offer cushion. "Why this verdict" uses backend notes.
+- Verdict and narrative now agree on dead deals (PR #11 verdict hard-fail fix).
+- Offer Gap QA complete across red (Overpay Risk), amber (Offer Gap), and green (Offer Cushion) states.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
@@ -45,6 +51,22 @@
   - "Why this verdict" now driven by backend result.notes
   - Stress-test downgrade context added
   - Frontend-only. No backend changes. No schema changes.
+- [x] RepairBudgetBuilder wired into Legacy Manual Analyze — frontend PR #41 (commit 3a2b600)
+  - One line added to src/App.tsx inside {showLegacy && ...} block
+  - Wired to existing rehabBudget state: `<RepairBudgetBuilder onApply={(mid) => setRehabBudget(mid)} />`
+  - Draft/Resume flow unchanged
+  - Frontend-only. No backend changes. No schema changes.
+- [x] Verdict hard-fail fix — backend PR #11 (merge commit 14d4dd4)
+  - File changed: app/analysis_engine.py
+  - Fix: overall_verdict now hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer
+  - Reason: live QA found a negative-profit overpay deal showing CONDITIONAL while notes said PASS unless terms change
+  - best_strategy unchanged. Individual strategy verdicts unchanged.
+  - No schema/model/route changes. No BRRRR redesign.
+  - Confirmed live in production.
+- [x] Offer Gap QA complete — all three callout states verified in production
+  - Red Overpay Risk: purchase_price 220k, ARV 300k, rehab 50k — top verdict PASS, red card shown, narrative agrees, Integrity Gate suppresses Lender Report and Negotiation Script
+  - Amber Tight Offer: purchase_price 176k, ARV 300k, rehab 50k — Offer Gap card shown amber, message says deal may work only if ARV and rehab assumptions hold
+  - Green Offer Cushion: purchase_price 160k, ARV 300k, rehab 50k — Offer Cushion card shown green, Lender Report and Negotiation Script available
 
 ### Not Done
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
@@ -55,7 +77,7 @@
   - Not urgent, but should be done soon
 
 ### Next Session Goal
-Get the product in front of a real user and capture feedback. Zero market contact is the primary risk.
+Do not start a big feature yet. Next priority: soft demo with one serious investor, hard money lender, or acquisitions person. Goal: observe cold reaction and identify what breaks trust. If something is visually embarrassing, do one small polish pass after feedback.
 
 ---
 
@@ -76,7 +98,8 @@ FlipForge is a risk-first real estate deal underwriting tool for serious investo
 - Net profit, ROI, profit margin
 - Flip / BRRRR / Wholesale scores and verdicts (BUY / CONDITIONAL / PASS)
 - Max Safe Offer (MAO)
-- Offer Gap callout comparing offer vs MAO (Overpay Risk / Offer Gap / Offer Cushion)
+- Offer Gap callout comparing offer vs MAO (Overpay Risk / Offer Gap / Offer Cushion) — renders in all flows
+- Repair Budget Builder — line-item rehab estimator, available in all flows
 - Rehab Reality classification (LIGHT / MEDIUM / HEAVY / EXTREME)
 - Stress test scenarios (ARV -5%, ARV -10%, Rehab +15%, Hold +2mo)
 - Risk flags with severity levels
@@ -184,7 +207,7 @@ src/
   AnalysisResult.tsx          ← Deal analysis results display (Offer Gap callout, verdict rationale)
   components/
     ShieldHeader.tsx          ← Header component
-    RepairBudgetBuilder.tsx   ← Repair budget estimator (PR #39, frontend-only)
+    RepairBudgetBuilder.tsx   ← Repair budget estimator (PR #39+#41, all three flows)
   lib/
     api.ts                    ← ALL fetch calls to backend
     types.ts                  ← ALL TypeScript types (canonical contract)
@@ -242,6 +265,9 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 
 **Frontend:**
 ```
+cb3444d   docs: session closeout 2026-05-11 — correct known-issues and capture QA results
+b2d2307   docs: update PROJECT_STATE and CLAUDE.md after PR #41 merge
+3a2b600   fix: show repair budget builder in legacy manual analyzer (#41)
 07654861  feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
 a46dda8   Merge pull request #39 — feat: add Repair Budget Builder
 c5809c2   fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
@@ -258,6 +284,9 @@ e307963   Restore UI styles
 
 **Backend:**
 ```
+14d4dd4  Merge pull request #11 — fix: hard-fail overall_verdict to PASS (no schema/model/route changes)
+2a6d8b0  fix: hard-fail overall_verdict to PASS when net_profit <= 0 and purchase_price > max_safe_offer
+036f36e  docs: session closeout 2026-05-10 — deal-memo polish (frontend-only)
 0eacb12  docs: update PROJECT_STATE.md and CLAUDE.md for 2026-05-10 session closeout
 196502b  fix: add RentCast cache and provider status handling (#10)
 fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
@@ -278,7 +307,7 @@ fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 - PDF generation must use in-memory bytes in production — disk writes will fail on Render
 - Render free tier cold starts — first request after inactivity may take 50+ seconds
 - No GitHub Actions CI — import/type errors are only caught at review time
-- Offer Gap callout is silent in legacy Manual Analyze path (no meta.purchase_price) — by design
+- Offer Gap callout renders in Legacy Manual Analyze flow (pdfMeta.purchase_price is populated from purchasePrice state). Visual QA confirmed across red, amber, and green states.
 - RentCast quota currently exhausted — do not run live /api/enrich-address without explicit approval
 
 ---
@@ -426,3 +455,83 @@ bathroom count stepper, sqft-based flooring, contingency selector.
 - No backend changes, no schema changes, no api.ts/types.ts changes, no RentCast calls
 
 **Build/deploy:** Vercel auto-deploy triggered on main merge.
+
+---
+
+## Session 2026-05-11 — Wire RepairBudgetBuilder into Legacy Manual Analyze (frontend-only)
+
+**PR:** frontend #41 (merged, commit 3a2b600)
+**Changed file:** `src/App.tsx` only
+
+**Issue:** RepairBudgetBuilder was not visible in Manual Analyze Legacy flow on live app.
+
+**Root cause:** Documentation/session-note error from PR #39. PR #39 only added the component inside
+`{draft && ...}` (Draft Deal / Resume Deal). The Legacy `{showLegacy && ...}` section was never touched.
+PR #40 (AnalysisResult.tsx only) was not involved — not a regression.
+
+**Fix:** One line added inside `{showLegacy && (...)}` block:
+`<RepairBudgetBuilder onApply={(mid) => setRehabBudget(mid)} />`
+Placed after the 4-field input grid, wired to existing `setRehabBudget`.
+
+**Live QA confirmed:**
+- RepairBudgetBuilder visible in Manual Analyze Legacy
+- Result screen still renders correctly after Analyze Deal
+
+**Guardrails:** No backend changes. No schema changes. No analysis_engine.py changes. Draft/Resume flow unchanged.
+
+---
+
+## Session 2026-05-11 — Backend verdict hard-fail fix
+
+**Branch:** `claude/review-project-state-LHSMY`
+**PR:** backend #11 (merged)
+**Merge commit:** `14d4dd4`
+**Changed file:** `app/analysis_engine.py` only
+
+**Bug found:** Live QA found a negative-profit overpay deal showing CONDITIONAL overall verdict
+while notes said PASS unless terms change. Verdict and narrative disagreed.
+
+**Fix:** overall_verdict now hard-fails to PASS when:
+`net_profit <= 0 AND purchase_price > max_safe_offer`
+
+**What did NOT change:**
+- best_strategy unchanged
+- Individual strategy verdicts unchanged
+- No schema/model/route changes
+- No BRRRR scoring redesign
+
+**Deploy:** Render.com auto-deploy triggered on main merge. Confirmed live in production.
+
+---
+
+## Production QA — Offer Gap callout (completed 2026-05-11)
+
+All three Offer Gap callout states verified in production after backend PR #11 and frontend PR #40/#41.
+
+### Red Overpay Risk — PASSED
+
+**Inputs:** purchase_price 220000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
+
+**Results:**
+- Top verdict: PASS (hard-fail triggered by PR #11 fix)
+- Red Overpay Risk card shown
+- Narrative agrees with verdict
+- Integrity Gate suppresses Lender Report and Negotiation Script
+
+### Amber Tight Offer — PASSED
+
+**Inputs:** purchase_price 176000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
+
+**Results:**
+- Max Safe Offer around $178,200
+- Offer Gap card shown in amber
+- Message says deal may work only if ARV and rehab assumptions hold
+
+### Green Offer Cushion — PASSED
+
+**Inputs:** purchase_price 160000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
+
+**Results:**
+- Max Safe Offer around $178,200
+- Offer Cushion card shown green
+- Lender Report and Negotiation Script available
