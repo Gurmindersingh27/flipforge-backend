@@ -20,12 +20,15 @@
 
 A risk-first real estate deal underwriting tool. Not a cashflow calculator — a "where does this deal break?" engine.
 
+**Short pitch:** Upload the house. Know the rehab. Know the offer.
+
 **Core user flow:**
-1. Paste listing URL → backend returns best-effort DraftDeal
-2. User fills missing fields in Draft Deal editor
-3. Frontend posts to `/api/finalize-and-analyze`
-4. Backend returns full AnalyzeResponse (verdict, risk cards, stress tests, breakpoints, rehab reality, narratives)
-5. User downloads lender PDF report
+1. Paste listing URL or enter deal info → backend returns best-effort DraftDeal
+2. Upload property photos → Photo Rehab Analyzer estimates visible rehab scope and cost
+3. User applies mid rehab estimate and fills any missing fields
+4. Frontend posts to `/api/finalize-and-analyze`
+5. Backend returns full AnalyzeResponse (verdict, risk cards, stress tests, breakpoints, rehab reality, narratives)
+6. User downloads lender PDF report
 
 **Target users:** Serious investors, hard money lenders, BRRRR operators, acquisition managers. Not beginners.
 
@@ -61,6 +64,8 @@ src/
   AnalysisResult.tsx          # Deal analysis display
   components/
     ShieldHeader.tsx          # Header component
+    RepairBudgetBuilder.tsx   # Manual repair budget estimator (PR #39+#41, all flows)
+    PhotoRehabAnalyzer.tsx    # Photo rehab analyzer (PR #42, all flows)
   lib/
     api.ts                    # All fetch calls to backend — DO NOT restructure
     types.ts                  # All shared TypeScript types — canonical contract
@@ -112,6 +117,8 @@ app/
     url_service.py             # URL scraping → DraftDeal
     pdf_service.py             # Lender report PDF generation (production risk — see below)
     rentcast_service.py        # RentCast enrichment + SQLite cache (30-day TTL)
+    photo_rehab_service.py     # Photo rehab analysis — Anthropic vision AI + controlled pricing
+    rehab_pricing.py           # Controlled SE US contractor pricing constants (flat/per_sqft/per_bath)
     analyze_service.py
     deal_service.py
     scenario_service.py
@@ -136,6 +143,9 @@ POST /api/draft-from-url           # Scrape listing URL → DraftDeal
 POST /api/finalize-and-analyze     # DraftDeal → AnalyzeResponse (422 if fields missing)
 POST /api/export/lender-report     # AnalyzeResponse → PDF bytes
 POST /api/enrich-address           # { address } → EnrichAddressResponse (SQLite cache, 30d TTL)
+POST /api/photo-rehab-analysis     # multipart/form-data → PhotoRehabAnalysisResponse
+                                   # 1-8 photos, max 3MB, JPEG/PNG/WEBP
+                                   # provider_status: live_success | ai_not_configured | ai_error | dev_stub
 ```
 
 **Run locally:**
@@ -172,6 +182,17 @@ Do not touch pdf_service.py without explicitly flagging this risk first.
 
 ---
 
+## Photo Rehab Analyzer — Critical Rules
+
+- AI identifies condition/severity only. Backend `rehab_pricing.py` controls ALL dollar estimates.
+- Do not let AI invent dollar amounts.
+- `PHOTO_REHAB_DEV_STUB` must NOT be set in production. Dev stub is for local testing only.
+- Env vars in Render: `ANTHROPIC_API_KEY` (set, hidden), `ANTHROPIC_MODEL=claude-sonnet-4-5`.
+- Photos are processed in memory only — never written to disk or stored.
+- Real Anthropic call has not yet been manually QA'd in browser — QA is the next session goal.
+
+---
+
 ## Deployment State
 
 - **Backend:** Render.com (render.yaml present in repo)
@@ -183,19 +204,23 @@ Do not touch pdf_service.py without explicitly flagging this risk first.
 
 ## Commit History
 
-**Frontend:**
-```
-c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse
-22d97b0  Fix hardcoded API_BASE in AnalysisResult.tsx
-ad39f86  Fix meta bridge + lender report + address override
-e307963  Restore UI styles
-23826a4  FlipForge frontend MVP
-```
-
 **Backend:**
 ```
-196502b  fix: add RentCast cache and provider status handling
+f39b1db  Merge pull request #13 — feat: photo rehab analyzer backend v1
+14d4dd4  Merge pull request #11 — fix: hard-fail overall_verdict to PASS
+196502b  fix: add RentCast cache and provider status handling (#10)
+fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 741c4c2  FlipForge backend MVP
+```
+
+**Frontend:**
+```
+370f5f2  feat: add photo rehab analyzer frontend (PR #42)
+3a2b600  fix: show repair budget builder in legacy manual analyzer (#41)
+07654861 feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
+a46dda8  Merge pull request #39 — feat: add Repair Budget Builder
+c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
+23826a4  FlipForge frontend MVP
 ```
 
 ---
