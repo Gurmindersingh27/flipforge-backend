@@ -4,80 +4,96 @@
 ---
 
 ## Last Updated
-2026-06-01
+2026-06-04
 
 ---
 
 ## 1. Current Phase & Progress
 
-**Current phase:** Verdict fix shipped, Offer Gap QA complete across all three states. Product is coherent enough for a soft demo.
+**Product direction:** Upload the house. Know the rehab. Know the offer.
+
+**Short pitch:** FlipForge helps real estate investors decide if a property is worth flipping before they waste time, money, or emotion on it. Upload photos, estimate rehab, stress-test the deal, and know your max safe offer before chasing the property.
+
+**Current core loop:**
+1. Enter property or deal info.
+2. Upload property photos.
+3. Photo Rehab Analyzer estimates visible condition and rehab range.
+4. User applies mid rehab estimate into the deal.
+5. Existing underwriting engine calculates max safe offer, risk, verdict, and investor outputs.
+6. User decides whether to offer, negotiate, verify, or walk away.
 
 **Current product state:**
-- Input credibility: Repair Budget Builder visible in all three flows (Draft Deal, Resume Deal, Legacy Manual Analyze).
-- Output credibility: Result screen calls out overpay risk, tight offer, or offer cushion. "Why this verdict" uses backend notes.
-- Verdict and narrative now agree on dead deals (PR #11 verdict hard-fail fix).
-- Offer Gap QA complete across red (Overpay Risk), amber (Offer Gap), and green (Offer Cushion) states.
+- Photo Rehab Analyzer v1 backend shipped (PR #13, merged, commit f39b1db).
+- Backend deployed on Render. Anthropic package installed. uvicorn running.
+- ANTHROPIC_API_KEY and ANTHROPIC_MODEL=claude-sonnet-4-5 set in Render production.
+- PHOTO_REHAB_DEV_STUB is NOT set in production.
+- Real Anthropic vision call not yet manually QA'd in browser — next session is QA only.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
 - [x] `/api/draft-from-url` working
 - [x] `/api/finalize-and-analyze` working (stress tests, breakpoints, rehab_reality, narratives)
 - [x] NarrativeGenerator fixed — accepts base metrics
-- [x] Frontend MVP exists — App.tsx, AnalysisResult.tsx, api.ts, types.ts all in place
-- [x] CLAUDE.md added to both repos
-- [x] PROJECT_STATE.md added to both repos
-- [x] Backend audited — requirements.txt clean, all 5 routes present, start command correct
+- [x] Backend audited — requirements.txt clean, all routes present, start command correct
 - [x] Render backend deployed successfully
 - [x] Live backend URL confirmed: https://flipforge-backend.onrender.com
 - [x] GET /api/health confirmed live and returning {"status":"ok"}
 - [x] POST /api/analyze confirmed working in prod
 - [x] POST /api/export/lender-report confirmed returning application/pdf in prod
 - [x] Full frontend → backend → PDF pipeline validated end-to-end
-- [x] Draft Deal editor: assumption fields (holding_months, annual_interest_rate, loan_to_cost_pct) exposed as editable inputs
-- [x] Draft Deal editor: extraction notes (draft.notes, draft.signals) displayed in panel
-- [x] Frontend deployed on Vercel: https://flipforge-frontend.vercel.app
-- [x] View Saved Deal — /deal/:id (read-only)
-- [x] Resume UX polish (conditional header, specific 422 messaging, assumption input highlighting)
-- [x] Results page clarity (max_safe_offer, confidence_score, risk flags, Integrity Gate)
-- [x] Saved Deals page clarity (max_safe_offer column, verdict badges, Resume action)
-- [x] Deal page clarity (max_safe_offer in header, duplicate buttons removed, allowed_outputs fixed)
-- [x] Legacy Manual Analyze hidden by default behind subtle toggle link
-- [x] PDF bug fix — None/None% no longer rendered for holding_months, annual_interest_rate, loan_to_cost_pct (fa30d10, app/services/pdf_service.py)
-- [x] RentCast address lookup cache — SQLite-backed, 30-day TTL, provider_status Literal contract (backend PR #10, frontend PR #38)
-- [x] Repair Budget Builder — frontend PR #39, src/components/RepairBudgetBuilder.tsx
-  - Frontend-only. No backend changes. No schema changes.
-- [x] Result screen deal-memo polish — frontend PR #40, src/AnalysisResult.tsx
-  - Offer Gap callout (Overpay Risk / Offer Gap / Offer Cushion)
-  - "Why this verdict" now driven by backend result.notes
-  - Stress-test downgrade context added
-  - Frontend-only. No backend changes. No schema changes.
-- [x] RepairBudgetBuilder wired into Legacy Manual Analyze — frontend PR #41 (commit 3a2b600)
-  - One line added to src/App.tsx inside {showLegacy && ...} block
-  - Wired to existing rehabBudget state: `<RepairBudgetBuilder onApply={(mid) => setRehabBudget(mid)} />`
-  - Draft/Resume flow unchanged
-  - Frontend-only. No backend changes. No schema changes.
+- [x] PDF bug fix — None/None% no longer rendered for holding_months, annual_interest_rate, loan_to_cost_pct (fa30d10)
+- [x] RentCast address lookup cache — SQLite-backed, 30-day TTL, provider_status Literal contract (PR #10)
 - [x] Verdict hard-fail fix — backend PR #11 (merge commit 14d4dd4)
-  - File changed: app/analysis_engine.py
-  - Fix: overall_verdict now hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer
-  - Reason: live QA found a negative-profit overpay deal showing CONDITIONAL while notes said PASS unless terms change
-  - best_strategy unchanged. Individual strategy verdicts unchanged.
-  - No schema/model/route changes. No BRRRR redesign.
+  - overall_verdict now hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer
+  - app/analysis_engine.py only. No schema/model/route changes.
   - Confirmed live in production.
 - [x] Offer Gap QA complete — all three callout states verified in production
-  - Red Overpay Risk: purchase_price 220k, ARV 300k, rehab 50k — top verdict PASS, red card shown, narrative agrees, Integrity Gate suppresses Lender Report and Negotiation Script
-  - Amber Tight Offer: purchase_price 176k, ARV 300k, rehab 50k — Offer Gap card shown amber, message says deal may work only if ARV and rehab assumptions hold
-  - Green Offer Cushion: purchase_price 160k, ARV 300k, rehab 50k — Offer Cushion card shown green, Lender Report and Negotiation Script available
+- [x] Photo Rehab Analyzer v1 — backend PR #13 (merge commit f39b1db)
+  - New endpoint: POST /api/photo-rehab-analysis (multipart/form-data)
+  - New service: app/services/photo_rehab_service.py (Anthropic vision AI call)
+  - New pricing module: app/services/rehab_pricing.py (controlled SE US contractor pricing)
+  - New Pydantic models in app/models.py: RoomFinding, RehabItem, PhotoRehabRiskFlag, PhotoRehabTotals, PhotoRehabAnalysisResponse
+  - New dependencies in requirements.txt: python-multipart>=0.0.9, anthropic>=0.40.0
+  - AI identifies condition/severity only. Backend pricing controls all dollar estimates.
+  - Photos processed in memory only — never stored.
+  - Validation: 1-8 photos, max 3MB each, JPEG/PNG/WEBP only
+  - Totals semantics: subtotal_low/mid/high = before contingency; low/mid/high = after contingency
+  - Dev stub activated ONLY when PHOTO_REHAB_DEV_STUB=true — NOT set in production
+  - analysis_engine.py untouched. AnalyzeRequest unchanged. AnalyzeResponse unchanged.
+  - Render deploy confirmed: anthropic installed, python-multipart installed, uvicorn running.
 
-### Not Done
+### Not Done / Blocked
+- [ ] **Photo Rehab Analyzer live browser QA — MUST COMPLETE BEFORE NEXT FEATURE**
+  - Real Anthropic call not yet QA'd in browser
+  - See Next Session Goal for full QA checklist
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
 - [ ] Add minimal GitHub Actions CI
   - Backend: import/startup check for FastAPI app
-  - Frontend: TypeScript + build check (tsc --noEmit && vite build)
-  - Goal: catch import/type errors before manual PR review
+  - Frontend: TypeScript + build check
   - Not urgent, but should be done soon
 
 ### Next Session Goal
-Do not start a big feature yet. Next priority: soft demo with one serious investor, hard money lender, or acquisitions person. Goal: observe cold reaction and identify what breaks trust. If something is visually embarrassing, do one small polish pass after feedback.
+**Photo Rehab Analyzer QA + Deploy Verification**
+
+Goal: Verify the live loop — upload photo → get rehab estimate → apply mid rehab → run deal analysis.
+
+QA checklist:
+- [ ] Confirm backend health endpoint: GET /api/health → {"status":"ok"}
+- [ ] Confirm PHOTO_REHAB_DEV_STUB is NOT set in Render production
+- [ ] Confirm ANTHROPIC_API_KEY is set in Render (without revealing value)
+- [ ] Confirm ANTHROPIC_MODEL is claude-sonnet-4-5
+- [ ] Upload 1-2 small real property photos via frontend
+- [ ] Confirm provider_status is live_success
+- [ ] Confirm rehab estimate displays (condition badge, cost totals, contingency)
+- [ ] Confirm missing_photo_warnings display
+- [ ] Confirm risk_flags display
+- [ ] Confirm disclaimer displays
+- [ ] Confirm "Use Mid as Rehab Budget" updates the rehab budget field
+- [ ] Confirm running analysis uses the applied rehab budget
+- [ ] Test both Draft/Resume flow and Legacy Manual Analyze flow
+- [ ] Test invalid upload cases: too many photos, file over 3MB, unsupported file type
+
+Do not start the next feature until this QA checklist passes.
 
 ---
 
@@ -94,25 +110,28 @@ No active dev branch. Work on named feature branches; never push to main directl
 
 ## 3. What This App Does
 
-FlipForge is a risk-first real estate deal underwriting tool for serious investors. The investor enters (or pastes a listing URL for) a property and gets:
+FlipForge is a risk-first real estate deal underwriting tool for serious investors.
+
+**The core loop:** Upload the house → know the rehab → know the offer.
+
+The investor enters (or pastes a listing URL for) a property, optionally uploads photos for AI rehab estimation, and gets:
+- Photo Rehab Analyzer — upload property photos, AI estimates visible rehab scope and cost range
 - Net profit, ROI, profit margin
 - Flip / BRRRR / Wholesale scores and verdicts (BUY / CONDITIONAL / PASS)
 - Max Safe Offer (MAO)
-- Offer Gap callout comparing offer vs MAO (Overpay Risk / Offer Gap / Offer Cushion) — renders in all flows
-- Repair Budget Builder — line-item rehab estimator, available in all flows
+- Offer Gap callout comparing offer vs MAO (Overpay Risk / Offer Gap / Offer Cushion)
+- Repair Budget Builder — manual line-item rehab estimator
 - Rehab Reality classification (LIGHT / MEDIUM / HEAVY / EXTREME)
 - Stress test scenarios (ARV -5%, ARV -10%, Rehab +15%, Hold +2mo)
-- Risk flags with severity levels
-- Breakpoints (first stress scenario that kills the deal)
-- Confidence score (0-100)
-- "Why this verdict" rationale (backend notes + stress context)
+- Risk flags, breakpoints, confidence score
+- "Why this verdict" rationale
 - Lender report PDF export
 
 ---
 
 ## 4. Backend (Python / FastAPI)
 
-**Stack:** FastAPI 0.115 / Uvicorn / Pydantic v2 / httpx / BeautifulSoup4 / ReportLab
+**Stack:** FastAPI 0.115 / Uvicorn / Pydantic v2 / httpx / BeautifulSoup4 / ReportLab / anthropic / python-multipart
 **Entry point:** `app/main.py` (NOT root `main.py` — that is an older v1 setup)
 **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 **Deploy:** Render.com (`render.yaml` present in repo)
@@ -126,6 +145,8 @@ pydantic==2.10.0
 httpx==0.28.0
 beautifulsoup4==4.12.3
 reportlab==4.2.5
+python-multipart>=0.0.9
+anthropic>=0.40.0
 ```
 
 ### File Structure
@@ -142,6 +163,8 @@ app/
     url_service.py             ← Scrapes listing URLs → DraftDeal
     pdf_service.py             ← Generates lender report PDF (ReportLab)
     rentcast_service.py        ← RentCast enrichment + SQLite cache (30-day TTL, provider_status contract)
+    photo_rehab_service.py     ← Photo rehab analysis (Anthropic vision AI + rehab_pricing.py)
+    rehab_pricing.py           ← Controlled SE US contractor pricing constants (flat/per_sqft/per_bath)
     analyze_service.py
     deal_service.py
     scenario_service.py
@@ -157,13 +180,17 @@ requirements.txt
 
 ### Active API Endpoints
 ```
-GET  /api/health                   ← ✅ confirmed live in prod
-POST /api/analyze                  ← AnalyzeRequest → AnalyzeResponse (SCHEMA FROZEN)
-POST /api/draft-from-url           ← { url } → DraftFromUrlResponse
-POST /api/finalize-and-analyze     ← DraftDeal → AnalyzeResponse (422 if fields missing)
-POST /api/export/lender-report     ← LenderReportRequest → PDF bytes
-POST /api/enrich-address           ← { address } → EnrichAddressResponse (SQLite cache, 30d TTL)
-                                      provider_status: cache_hit | live_success | quota_exhausted | provider_unavailable
+GET  /api/health                        ← confirmed live in prod
+POST /api/analyze                       ← AnalyzeRequest → AnalyzeResponse (SCHEMA FROZEN)
+POST /api/draft-from-url                ← { url } → DraftFromUrlResponse
+POST /api/finalize-and-analyze          ← DraftDeal → AnalyzeResponse (422 if fields missing)
+POST /api/export/lender-report          ← LenderReportRequest → PDF bytes
+POST /api/enrich-address                ← { address } → EnrichAddressResponse (SQLite cache, 30d TTL)
+                                           provider_status: cache_hit | live_success | quota_exhausted | provider_unavailable
+POST /api/photo-rehab-analysis          ← multipart/form-data (photos + optional sqft/region/property_type/user_notes)
+                                           → PhotoRehabAnalysisResponse
+                                           Validation: 1-8 photos, max 3MB each, JPEG/PNG/WEBP only
+                                           provider_status: live_success | ai_not_configured | ai_error | dev_stub
 ```
 
 ### Analysis Engine Logic (analysis_engine.py)
@@ -177,66 +204,36 @@ POST /api/enrich-address           ← { address } → EnrichAddressResponse (SQ
 - `build_notes()` — produces 2–3 human-readable rationale strings surfaced in frontend "Why this verdict"
 - Verdict thresholds: score >= 75 = BUY, >= 55 = CONDITIONAL, else PASS
 
+### Photo Rehab Analyzer (photo_rehab_service.py + rehab_pricing.py)
+- `analyze_photos()` — main entry point, called from POST /api/photo-rehab-analysis
+- Sends base64-encoded images to Anthropic Claude vision model
+- AI identifies condition/severity per category — AI never invents dollar amounts
+- `rehab_pricing.py` maps (category, severity) to controlled dollar ranges
+- 9 pricing categories: kitchen, bathrooms, flooring, paint_drywall, roof, hvac, electrical, plumbing, windows_exterior
+- Pricing types: flat, per_sqft (needs sqft), per_bath (uses bathroom count from AI)
+- Contingency: confidence <50 → 20%, 50-75 → 15%, >75 → 10%
+- Totals: subtotal_low/mid/high = pre-contingency; low/mid/high = post-contingency
+- Dev stub: activated ONLY when PHOTO_REHAB_DEV_STUB=true — NOT set in production
+- Env vars: ANTHROPIC_API_KEY (required for live_success), ANTHROPIC_MODEL (default: claude-sonnet-4-5)
+
 ### URL Scraping (url_service.py)
 - httpx fetch with browser User-Agent
-- Extraction priority: OG price tags → JSON-LD structured data → regex on body text
 - Returns SOURCE_BLOCKED on 403/429 (Zillow/Redfin block this — known, not a bug)
 - ARV and rehab_budget are ALWAYS missing — investor must fill manually
 - Only purchase_price can realistically be scraped
 
 ### PDF Export (pdf_service.py)
 - Uses ReportLab (pure Python, no system deps)
-- Sections: Header, Property Summary, Deal Overview, Financial Assumptions, Analysis Output, Rehab Reality, Risk Notes, Exit Strategy
-- Color coded verdicts: BUY=green, CONDITIONAL=amber, PASS=red
 - ⚠️ Production risk: must use in-memory bytes (StreamingResponse), no disk writes
 
----
-
-## 5. Frontend (React / TypeScript / Vite)
-
-**Stack:** React 19 / TypeScript ~5.9 / Vite 7 / No UI library / Vanilla CSS
-
-### File Structure
-```
-src/
-  main.tsx                    ← App entry point
-  App.tsx                     ← Root component
-  App.css / index.css         ← Global styles
-  config.ts                   ← API_BASE_URL (keep separate from api.ts — do not merge)
-  shield.ts                   ← Shield logic
-  AnalysisResult.tsx          ← Deal analysis results display (Offer Gap callout, verdict rationale)
-  components/
-    ShieldHeader.tsx          ← Header component
-    RepairBudgetBuilder.tsx   ← Repair budget estimator (PR #39+#41, all three flows)
-  lib/
-    api.ts                    ← ALL fetch calls to backend
-    types.ts                  ← ALL TypeScript types (canonical contract)
-  assets/
-    react.svg
-```
-
-### API Config
-- Reads env var: `VITE_API_BASE_URL`
-- Fallback (dev): `http://127.0.0.1:8000`
-- `config.ts` and `api.ts` are intentionally separate — do not consolidate
-
-### API Functions (api.ts)
-- `analyzeDeal(payload)` → `POST /api/analyze`
-- `draftFromUrl(url)` → `POST /api/draft-from-url`
-- `finalizeAndAnalyze(draft)` → `POST /api/finalize-and-analyze` (handles 422 missing_fields)
-- PDF export call — check App.tsx / AnalysisResult.tsx for usage
-
-### NPM Scripts
-```
-npm run dev       # Vite dev server (http://localhost:5173)
-npm run build     # tsc + vite build
-npm run lint      # ESLint
-npm run preview   # Preview production build
-```
+### RentCast Enrichment (rentcast_service.py)
+- SQLite cache, 30-day TTL, cache key = normalized address
+- provider_status contract: cache_hit | live_success | quota_exhausted | provider_unavailable
+- RentCast quota may be exhausted — do not run live tests without explicit approval
 
 ---
 
-## 6. Shared Data Contract
+## 5. Shared Data Contract
 
 Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py` (backend) in the same session.
 
@@ -256,35 +253,24 @@ Any change must be made in BOTH `src/lib/types.ts` (frontend) AND `app/models.py
 | `Confidence` | `"HIGH"\|"MEDIUM"\|"LOW"\|"MISSING"` | same |
 | `RehabSeverity` | `"LIGHT"\|"MEDIUM"\|"HEAVY"\|"EXTREME"` | same |
 | `ProviderStatus` | `"cache_hit"\|"live_success"\|"quota_exhausted"\|"provider_unavailable"` | same |
+| `PhotoRehabCondition` | `"light"\|"medium"\|"heavy"\|"unknown"` | same |
+| `PhotoRehabProviderStatus` | `"live_success"\|"ai_not_configured"\|"ai_error"\|"dev_stub"` | same |
+| `PhotoRehabAnalysisResponse` | ✅ | ✅ |
+| `RoomFinding` | ✅ | ✅ |
+| `RehabItem` | ✅ | ✅ |
+| `PhotoRehabRiskFlag` | ✅ | ✅ |
+| `PhotoRehabTotals` | ✅ | ✅ |
 
 **AnalyzeRequest schema is frozen. Do not modify it.**
 
 ---
 
-## 7. Commit History
-
-**Frontend:**
-```
-cb3444d   docs: session closeout 2026-05-11 — correct known-issues and capture QA results
-b2d2307   docs: update PROJECT_STATE and CLAUDE.md after PR #41 merge
-3a2b600   fix: show repair budget builder in legacy manual analyzer (#41)
-07654861  feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
-a46dda8   Merge pull request #39 — feat: add Repair Budget Builder
-c5809c2   fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
-0c2a97a   Hide Legacy Manual Analyze section by default
-b744b2a   feat: deal page clarity — max offer, remove duplicate buttons, fix allowed_outputs
-18fe47e   feat: saved deals page clarity
-07fb928   feat: results page clarity polish
-9616d4e   feat: polish Resume UX — conditional header and specific validation messaging
-22d97b0   Fix hardcoded API_BASE in AnalysisResult.tsx
-ad39f86   Fix meta bridge + lender report + address override
-e307963   Restore UI styles
-23826a4   FlipForge frontend MVP
-```
+## 6. Commit History
 
 **Backend:**
 ```
-14d4dd4  Merge pull request #11 — fix: hard-fail overall_verdict to PASS (no schema/model/route changes)
+f39b1db  Merge pull request #13 — feat: photo rehab analyzer backend v1
+14d4dd4  Merge pull request #11 — fix: hard-fail overall_verdict to PASS
 2a6d8b0  fix: hard-fail overall_verdict to PASS when net_profit <= 0 and purchase_price > max_safe_offer
 036f36e  docs: session closeout 2026-05-10 — deal-memo polish (frontend-only)
 0eacb12  docs: update PROJECT_STATE.md and CLAUDE.md for 2026-05-10 session closeout
@@ -293,22 +279,75 @@ fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 741c4c2  FlipForge backend MVP
 ```
 
+**Frontend:**
+```
+370f5f2  feat: add photo rehab analyzer frontend (PR #42)
+3a2b600  fix: show repair budget builder in legacy manual analyzer (#41)
+07654861 feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
+a46dda8  Merge pull request #39 — feat: add Repair Budget Builder
+c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddressResponse (#38)
+23826a4  FlipForge frontend MVP
+```
+
 ---
 
-## 8. Known Issues
+## 7. Known Issues
 
-- Root `main.py` (backend) is an older v1 router setup — active app is `app/main.py`
+- Root `main.py` is an older v1 router setup — active app is `app/main.py`
 - `app/core/analysis_engine.py` exists alongside `app/analysis_engine.py` — confirm which is imported before editing either
-- `app/core/config.py` imports pydantic-settings but is dead code — not in active import chain, do not add pydantic-settings to requirements.txt
+- `app/core/config.py` imports pydantic-settings but is dead code — not in active import chain
 - CORS is wide open (`*`) — needs tightening to Vercel domain before production hardening
-- No auth system yet
-- Database models exist (SQLite/SQLAlchemy) but may not be wired into active routes
 - Zillow/Redfin block URL scraping (SOURCE_BLOCKED) — known limitation, not a bug
 - PDF generation must use in-memory bytes in production — disk writes will fail on Render
 - Render free tier cold starts — first request after inactivity may take 50+ seconds
 - No GitHub Actions CI — import/type errors are only caught at review time
-- Offer Gap callout renders in Legacy Manual Analyze flow (pdfMeta.purchase_price is populated from purchasePrice state). Visual QA confirmed across red, amber, and green states.
-- RentCast quota currently exhausted — do not run live /api/enrich-address without explicit approval
+- RentCast quota may be exhausted — do not run live /api/enrich-address without explicit approval
+- **Photo Rehab Analyzer — real Anthropic call not yet manually QA'd in browser**
+- **Photo Rehab Analyzer — API cost exists per photo analysis call (Anthropic charges per token)**
+- **Photo Rehab Analyzer — cold start + AI call may be slow on first request**
+- **Photo Rehab Analyzer — results are AI-assisted planning estimates, not contractor bids**
+- **Photo Rehab Analyzer — unknown/invisible systems (roof, HVAC, electrical, plumbing) generate warnings, not pricing**
+
+---
+
+## 8. Feature Backlog
+
+**Do not start any of these until Photo Rehab Analyzer live QA passes.**
+
+### Next Features To Add After Photo Rehab QA
+
+**Priority 1 — Deal Killer Summary**
+- Prominent top-of-results section in plain English.
+- Explains what kills this specific deal (asking price above MAO, rehab too high, ARV too sensitive, unknown major systems, stress test failure).
+
+**Priority 2 — Investor Action Plan**
+- After each analysis, show next steps tailored to the result.
+- Examples: offer no more than $X, verify major systems, request access, use negotiation script.
+
+**Priority 3 — Copyable Investor Summary**
+- One-click copy of property basics, rehab estimate, max safe offer, verdict, deal killers, risk warnings, next action.
+
+**Priority 4 — Lender / Investor Report Polish**
+- Make PDF/report feel lender-grade. Include photo rehab summary once QA confirms it works.
+
+**Priority 5 — Comps / ARV Confidence Engine**
+- Data-agnostic comp analysis, ARV bands, confidence scoring, outlier handling.
+
+**Priority 6 — Title / Lien / Auction Risk Engine**
+- Tax delinquency, HOA/municipal liens, judgments/mechanic liens, preforeclosure, scheduled auction, probate/estate, code violations.
+
+**Priority 7 — Deal Alert Engine** *(later)*
+- Scan listings against buy box. Alert users to possible deals.
+
+**Priority 8 — Saved Deals / Deal Memory** *(later)*
+- Better history, track photo rehab results, track user decisions.
+
+**Priority 9 — Contractor Marketplace** *(later, not now)*
+**Priority 10 — Learning Brain** *(later, not now)*
+**Priority 11 — Social / Investor Profiles** *(later, not now)*
+
+**Parked: AIM — Asset Intelligence Modules**
+- Cars, furniture, equipment, non-real-estate assets. Do not build until real estate MVP is validated.
 
 ---
 
@@ -338,200 +377,80 @@ Do not make any code changes yet.
 
 ---
 
-## Session 2026-05-09: Fixed Finalize & Analyze Button Visibility
+## Session 2026-05-09 — Finalize & Analyze button visibility fixed
 
-**Bug:** Finalize & Analyze button in Address draft flow appeared dark/invisible when enabled
-
-**Root cause:** Vite boilerplate leftover in src/index.css:
-button { background-color: #1a1a1a; }
-
-Un-layered global CSS overrides Tailwind v4 @layer utilities, so
-bg-[#E8C547] class was present but not rendering.
-
-**Diagnostic method:** Added runtime panel (PR #35) showing:
-- canFinalize: true
-- btn.disabled: false
-- computed.backgroundColor: rgb(26,26,26) (not gold)
-
-Proved CSS override, not state/logic bug.
-
-**Fixes:**
-- PR #34: RentCast estimate Number() coercion (arv/rent stored as numbers)
-- PR #36: Removed global button rules from index.css
-- PR #37: Cleanup diagnostic code (PR #35 accidentally merged)
-
-**Verified working:**
-- Address lookup → draft → Finalize & Analyze = bright gold, clickable
-- Resume Deal → same gold button
-- Diagnostic panel removed from production
-
-**Known cosmetic issue (not blocking):**
-Legacy manual analyzer "Analyze Deal" button still gray - separate
-styling, not same bug. Can be updated separately if desired.
-
-**Lesson:** Runtime inspection > source speculation. Diagnostic panel
-exposed real bug in 5 min after 45 min of symptom-chasing.
-
-**Note:** RentCast quota exhausted (50 calls/month free tier).
-Future: add caching/rate-limit.
+**Root cause:** Vite boilerplate `button { background-color: #1a1a1a; }` in src/index.css overrode Tailwind v4 utilities.
+**Fixes:** PR #34 (Number() coercion), PR #36 (remove global button rules), PR #37 (remove diagnostic panel).
+**Note:** RentCast quota exhausted during debugging.
 
 ---
 
 ## Session 2026-05-10 — RentCast caching / quota protection
 
-**Goal:** Prevent repeated RentCast API calls and protect quota during demos and early usage.
-
-**Implementation (backend PR #10, frontend PR #38):**
-- New `rentcast_cache` SQLite table — auto-created by `init_db()` on startup for the current SQLite-backed environment
-- Cache key: `address.strip().lower()` with whitespace collapsed — stable, no external hash
-- TTL: 30 days — checked on read
-- `enrich_address()` accepts optional `db: Session` — cache-aware when injected, safe without
-- `enrich_address_endpoint` injects `db: Session = Depends(get_db)`
-- Cache write only on `provider_status = "live_success"`
-
-**provider_status Literal contract:**
-- `cache_hit` — returned from SQLite cache within TTL
-- `live_success` — RentCast responded; result written to cache
-- `quota_exhausted` — RentCast returned 429; empty signals returned, not cached
-- `provider_unavailable` — any other RentCast/network failure; empty signals returned, not cached
-
-**Guardrails confirmed:**
-- `analysis_engine.py` untouched
-- `AnalyzeRequest` untouched
-- No new pip dependencies
-- Manual entry flow remains available when RentCast fails (200 + empty signals + provider_status)
-- Failed/quota responses are never written to cache
-
-**Quota note:**
-RentCast quota is currently exhausted. Do not run live `/api/enrich-address` tests without explicit approval.
-Cache will serve repeat lookups from SQLite once quota resets and first live call succeeds.
-
-**Deploy:**
-- Backend: Render.com auto-deploy triggered on main merge (commit 196502b)
-- Frontend: Vercel auto-deploy triggered on main merge (commit c5809c2)
-
----
-
-## Session 2026-05-10 — Repair Budget Builder (frontend-only)
-
-**PR:** frontend #39 (merged, commit a46dda8)
-**Changed files:** `src/components/RepairBudgetBuilder.tsx` (new), `src/App.tsx` (+1 import, +1 JSX element)
-
-**Feature:** Self-contained repair cost estimator. 9 repair categories, Low/Mid/High estimates,
-bathroom count stepper, sqft-based flooring, contingency selector.
-"Use Mid as Rehab Budget" applies to existing rehab_budget field.
-
-**Guardrails:** No backend changes. No AnalyzeRequest changes. No types.ts changes. No analysis_engine.py changes.
+**PR:** backend #10 (commit 196502b), frontend #38 (commit c5809c2)
+- SQLite cache, 30-day TTL. provider_status: cache_hit | live_success | quota_exhausted | provider_unavailable.
+- Cache write only on live_success.
 
 ---
 
 ## Session 2026-05-10 — Result screen deal-memo polish (frontend-only)
 
-**Branch:** `claude/deal-decision-memo`
-**PR:** frontend #40 (merged)
-**Merge commit:** `07654861`
-**Changed file:** `src/AnalysisResult.tsx` only
-
-**Features shipped:**
-
-1. **Offer Gap callout** — new colored section between Key Numbers and Verdict cards
-   - Compares `meta.purchase_price` vs `result.max_safe_offer`
-   - Overpay Risk (red): purchase_price > max_safe_offer
-   - Offer Gap (amber): within $5k under max_safe_offer
-   - Offer Cushion (green): more than $5k under max_safe_offer
-   - Silent when meta.purchase_price is absent
-
-2. **Verdict rationale** — "Why this verdict" rebuilt
-   - Uses `result.notes` (from backend `build_notes()`) as primary bullets
-   - Optional breakpoint context, optional first stress-test downgrade line
-   - Dead `verdictReason` lookup removed (field never populated by backend)
-
-3. **Notes subsection removed** — only deleted UI block
-   - Notes content moved up into "Why this verdict"
-
-**Guardrails confirmed:**
-- `analysis_engine.py` untouched — `build_notes()` was already returning good text
-- `AnalyzeRequest` untouched
-- No backend changes, no schema changes, no api.ts/types.ts changes, no RentCast calls
-
-**Build/deploy:** Vercel auto-deploy triggered on main merge.
+**PR:** frontend #40 (commit 07654861) — src/AnalysisResult.tsx only. No backend changes.
 
 ---
 
 ## Session 2026-05-11 — Wire RepairBudgetBuilder into Legacy Manual Analyze (frontend-only)
 
-**PR:** frontend #41 (merged, commit 3a2b600)
-**Changed file:** `src/App.tsx` only
-
-**Issue:** RepairBudgetBuilder was not visible in Manual Analyze Legacy flow on live app.
-
-**Root cause:** Documentation/session-note error from PR #39. PR #39 only added the component inside
-`{draft && ...}` (Draft Deal / Resume Deal). The Legacy `{showLegacy && ...}` section was never touched.
-PR #40 (AnalysisResult.tsx only) was not involved — not a regression.
-
-**Fix:** One line added inside `{showLegacy && (...)}` block:
-`<RepairBudgetBuilder onApply={(mid) => setRehabBudget(mid)} />`
-Placed after the 4-field input grid, wired to existing `setRehabBudget`.
-
-**Live QA confirmed:**
-- RepairBudgetBuilder visible in Manual Analyze Legacy
-- Result screen still renders correctly after Analyze Deal
-
-**Guardrails:** No backend changes. No schema changes. No analysis_engine.py changes. Draft/Resume flow unchanged.
+**PR:** frontend #41 (commit 3a2b600) — src/App.tsx only. No backend changes.
 
 ---
 
 ## Session 2026-05-11 — Backend verdict hard-fail fix
 
-**Branch:** `claude/review-project-state-LHSMY`
-**PR:** backend #11 (merged)
-**Merge commit:** `14d4dd4`
-**Changed file:** `app/analysis_engine.py` only
-
-**Bug found:** Live QA found a negative-profit overpay deal showing CONDITIONAL overall verdict
-while notes said PASS unless terms change. Verdict and narrative disagreed.
-
-**Fix:** overall_verdict now hard-fails to PASS when:
-`net_profit <= 0 AND purchase_price > max_safe_offer`
-
-**What did NOT change:**
-- best_strategy unchanged
-- Individual strategy verdicts unchanged
-- No schema/model/route changes
-- No BRRRR scoring redesign
-
-**Deploy:** Render.com auto-deploy triggered on main merge. Confirmed live in production.
+**PR:** backend #11 (merge commit 14d4dd4) — app/analysis_engine.py only.
+- overall_verdict hard-fails to PASS when net_profit <= 0 AND purchase_price > max_safe_offer.
+- Confirmed live in production.
 
 ---
 
 ## Production QA — Offer Gap callout (completed 2026-05-11)
 
-All three Offer Gap callout states verified in production after backend PR #11 and frontend PR #40/#41.
+All three states verified in production.
+- Red: purchase 220k, ARV 300k, rehab 50k → PASS verdict, Integrity Gate active.
+- Amber: purchase 176k, ARV 300k, rehab 50k → Offer Gap amber.
+- Green: purchase 160k, ARV 300k, rehab 50k → Offer Cushion green, PDF + script available.
 
-### Red Overpay Risk — PASSED
+---
 
-**Inputs:** purchase_price 220000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
+## Session 2026-06-04 — Photo Rehab Analyzer v1
 
-**Results:**
-- Top verdict: PASS (hard-fail triggered by PR #11 fix)
-- Red Overpay Risk card shown
-- Narrative agrees with verdict
-- Integrity Gate suppresses Lender Report and Negotiation Script
+**Backend PR:** #13 (merged, commit f39b1db)
 
-### Amber Tight Offer — PASSED
+**What was added:**
+- `POST /api/photo-rehab-analysis` endpoint (multipart/form-data)
+- `app/services/photo_rehab_service.py` — Anthropic vision AI call, response normalization, dev stub
+- `app/services/rehab_pricing.py` — controlled SE US contractor pricing constants
+- New Pydantic models in `app/models.py`: RoomFinding, RehabItem, PhotoRehabRiskFlag, PhotoRehabTotals, PhotoRehabAnalysisResponse
+- New dependencies: `python-multipart>=0.0.9`, `anthropic>=0.40.0`
 
-**Inputs:** purchase_price 176000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
+**What was NOT changed:**
+- analysis_engine.py — untouched
+- AnalyzeRequest — unchanged
+- AnalyzeResponse — unchanged
+- All existing routes — unchanged
 
-**Results:**
-- Max Safe Offer around $178,200
-- Offer Gap card shown in amber
-- Message says deal may work only if ARV and rehab assumptions hold
+**Render production env vars:**
+- ANTHROPIC_API_KEY: set (hidden)
+- ANTHROPIC_MODEL: claude-sonnet-4-5
+- PHOTO_REHAB_DEV_STUB: NOT set (do not add)
 
-### Green Offer Cushion — PASSED
+**Deploy verification:**
+- Render build logs confirmed: anthropic installed, python-multipart installed, uvicorn running.
+- Dev-stub smoke test passed: response shape valid, validation working, totals semantics correct.
 
-**Inputs:** purchase_price 160000, ARV 300000, rehab 50000, rent 1800, holding 6, interest 12, LTC 90
-
-**Results:**
-- Max Safe Offer around $178,200
-- Offer Cushion card shown green
-- Lender Report and Negotiation Script available
+**Known risks going into QA:**
+- Real Anthropic call not yet browser-tested
+- API cost per photo analysis call (Anthropic charges per token)
+- Cold start + AI processing may be slow on first request
+- Results are planning estimates, not contractor bids
+- Unknown major systems generate inspection warnings, not fake pricing
