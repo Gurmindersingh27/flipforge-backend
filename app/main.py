@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, File, Form, HTTPException, Depends, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from .models import (
     LenderReportRequest,
     NegotiationScriptRequest,
     NegotiationScriptResponse,
+    PhotoRehabAnalysisResponse,
     SaveDealRequest,
     SavedDealResponse,
 )
@@ -23,6 +24,7 @@ from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
 from .services.rentcast_service import enrich_address
+from .services.photo_rehab_service import analyze_photos
 from .db.init_db import init_db
 from .db.session import get_db
 from .db.models.saved_deal import SavedDeal
@@ -174,6 +176,66 @@ def enrich_address_endpoint(body: EnrichAddressRequest, db: Session = Depends(ge
     if not address:
         raise HTTPException(status_code=422, detail="address must not be blank.")
     return enrich_address(address, db)
+
+
+# ---------------------------------------------------------------------------
+# Photo Rehab Analyzer — vision AI + controlled pricing
+# ---------------------------------------------------------------------------
+
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_PHOTO_SIZE = 3 * 1024 * 1024  # 3MB
+MAX_PHOTOS = 8
+
+
+@app.post("/api/photo-rehab-analysis", response_model=PhotoRehabAnalysisResponse)
+async def photo_rehab_analysis(
+    photos: list[UploadFile] = File(...),
+    sqft: int | None = Form(default=None),
+    region: str | None = Form(default=None),
+    property_type: str | None = Form(default=None),
+    user_notes: str | None = Form(default=None),
+):
+    """
+    Analyze property photos to estimate rehab scope and cost.
+    AI identifies condition/severity; backend controls all dollar estimates.
+    Photos are processed in-memory only — never stored.
+    """
+    if not photos or len(photos) < 1:
+        raise HTTPException(status_code=422, detail="At least 1 photo is required.")
+    if len(photos) > MAX_PHOTOS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum {MAX_PHOTOS} photos allowed. You sent {len(photos)}.",
+        )
+
+    images: list[tuple[bytes, str]] = []
+
+    for i, photo in enumerate(photos):
+        content_type = photo.content_type or ""
+        if content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Photo {i+1} has invalid type '{content_type}'. Allowed: JPEG, PNG, WEBP.",
+            )
+
+        data = await photo.read()
+        if len(data) > MAX_PHOTO_SIZE:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Photo {i+1} exceeds 3MB limit ({len(data) / 1024 / 1024:.1f}MB).",
+            )
+
+        images.append((data, content_type))
+
+    result = analyze_photos(
+        images=images,
+        sqft=sqft,
+        region=region,
+        property_type=property_type,
+        user_notes=user_notes,
+    )
+
+    return PhotoRehabAnalysisResponse(**result)
 
 
 # ---------------------------------------------------------------------------
