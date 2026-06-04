@@ -28,6 +28,7 @@
 - Live Anthropic vision call confirmed working in production (provider_status: live_success).
 - ANTHROPIC_API_KEY and ANTHROPIC_MODEL=claude-sonnet-4-5 set in Render production.
 - PHOTO_REHAB_DEV_STUB is NOT set in production.
+- Deal Killer Summary v1 shipped (frontend PR #45, merged) — frontend-only, no backend changes.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
@@ -67,6 +68,9 @@
   - Invalid upload: PDF blocked at file-picker, 12 photos triggered frontend validation ("Maximum 8 photos. You selected 12.")
   - Oversized file not tested (no >3MB test file available — not a blocker)
   - Core loop validated: upload photo → estimate rehab → apply mid → run underwriting
+- [x] Deal Killer Summary v1 — frontend PR #45 (merged, no backend changes)
+  - Frontend-only feature. No backend files, schemas, models, or analysis_engine.py touched.
+  - Visual QA not yet done — next session goal.
 
 ### Not Done / Blocked
 - [ ] Tighten CORS from * to https://flipforge-frontend.vercel.app
@@ -77,12 +81,11 @@
   - Not urgent, but should be done soon
 
 ### Next Session Goal
-**Scope Deal Killer Summary (no implementation yet)**
+**Deal Killer Summary visual QA in production/preview**
 
-Goal: Agree on scope, layout, and data sources for the Deal Killer Summary before writing any code.
-
-- What kills this specific deal? (asking price above MAO, rehab too high, ARV too sensitive, unknown major systems, stress test failure)
-- Where does it appear in the result screen?
+- Test PASS, CONDITIONAL, and BUY verdict cases in browser
+- Check spacing and mobile layout
+- No backend work expected for this session
 - Which existing backend fields power it? (max_safe_offer, net_profit, risk_flags, stress_tests, breakpoints)
 - Does it require any new backend fields or just frontend logic?
 
@@ -274,6 +277,8 @@ fa30d10  fix(pdf): render None percentage fields as '—' instead of 'None%'
 
 **Frontend:**
 ```
+b96c13f  chore: replace em dashes with ASCII hyphens in comments (PR #45)
+c213c1b  feat: add Deal Killer Summary v1 to result screen (PR #45)
 370f5f2  feat: add photo rehab analyzer frontend (PR #42)
 3a2b600  fix: show repair budget builder in legacy manual analyzer (#41)
 07654861 feat: result screen deal-memo polish — offer gap callout + verdict rationale (#40)
@@ -313,9 +318,9 @@ c5809c2  fix: add ProviderStatus type and cache metadata fields to EnrichAddress
 
 ### Next Features To Add (in priority order)
 
-**Priority 1 — Deal Killer Summary**
-- Prominent top-of-results section in plain English.
-- Explains what kills this specific deal (asking price above MAO, rehab too high, ARV too sensitive, unknown major systems, stress test failure).
+**Priority 1 — Deal Killer Summary** *(merged frontend PR #45 — awaiting visual QA)*
+- Shipped frontend-only. No backend changes required or made.
+- Visual QA (PASS / CONDITIONAL / BUY cases, spacing, mobile) is the next session goal.
 
 **Priority 2 — Investor Action Plan**
 - After each analysis, show next steps tailored to the result.
@@ -486,3 +491,14 @@ All three states verified in production.
 
 **QA conclusion:** POST /api/photo-rehab-analysis is production-ready. Feature is ready for demo.
 **Next step:** Scope Deal Killer Summary before any implementation.
+
+---
+
+## Session 2026-06-04 — Deal Killer Summary v1 (frontend-only)
+
+**Frontend PR:** #45 (merged) — no backend files changed in this session.
+
+- New frontend component: src/components/DealKillerSummary.tsx
+- Updated: src/AnalysisResult.tsx (import + JSX placement only)
+- No backend files touched. No schema changes. No analysis_engine.py changes. No RentCast or Anthropic calls.
+- Build passed. Visual QA not yet done — next session goal.
