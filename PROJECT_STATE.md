@@ -4,7 +4,7 @@
 ---
 
 ## Last Updated
-2026-06-04
+2026-07-31
 
 ---
 
@@ -29,6 +29,10 @@
 - ANTHROPIC_API_KEY and ANTHROPIC_MODEL=claude-sonnet-4-5 set in Render production.
 - PHOTO_REHAB_DEV_STUB is NOT set in production.
 - Deal Killer Summary v1 shipped (frontend PR #45, merged) — frontend-only, no backend changes.
+- **Active phase: Demo Conversion Readiness.** Frontend is the primary current source of truth (see frontend PROJECT_STATE.md); backend is unchanged since Photo Rehab Analyzer v1.
+- **Lender demo integrity fixes (frontend PRs #56 + #57, merged 2026-07-31) — frontend-only, NO backend changes.** These aligned the frontend to existing backend behavior; they did not modify any backend source, model, schema, `AnalyzeRequest`, API contract, or `analysis_engine.py`.
+  - LTC display (PR #56): the frontend now displays the actual LTC used by underwriting — the draft's submitted `loan_to_cost_pct` in the draft flow, and the backend's existing 90% default (`app/models.py` `loan_to_cost_pct = 0.90`) in the manual flow. The 90% default is unchanged and remains the backend source of truth.
+  - Non-positive rent (PR #57): the frontend now normalizes blank/zero/negative `est_monthly_rent` to omitted (`null`) before calling `/api/analyze` and `/api/finalize-and-analyze`. This matches the backend's existing rent semantics — `est_monthly_rent is None` means "no rent" (BRRRR read limited, no rent-to-cost flag), while a non-`None` `0.0` was previously treated as a real $0 rent. Backend rent logic in `app/analysis_engine.py` is unchanged and remains the source of truth.
 
 ### Done
 - [x] Backend Day 1 complete — DraftDeal, DataPoint/Confidence models built
@@ -502,3 +506,15 @@ All three states verified in production.
 - Updated: src/AnalysisResult.tsx (import + JSX placement only)
 - No backend files touched. No schema changes. No analysis_engine.py changes. No RentCast or Anthropic calls.
 - Build passed. Visual QA not yet done — next session goal.
+
+---
+
+## Session 2026-07-31 — Lender demo integrity fixes (frontend-only)
+
+**Frontend PRs:** #56 (LTC display, source 8e5e710, merge 6f0b01c) and #57 (non-positive rent, source 7c643d7, merge fc0aab5). **No backend files changed.**
+
+- Both fixes are frontend-only and align the UI to existing backend behavior. No backend source, model, schema, `AnalyzeRequest`, API contract, or `analysis_engine.py` changes; no dependencies; no scoring/confidence/risk-logic changes.
+- LTC display (PR #56): frontend now shows the underwriting LTC — draft's submitted `loan_to_cost_pct` in the draft flow, the backend's existing 90% default in manual. Misleading manual LTC input removed. Backend 90% default unchanged.
+- Non-positive rent (PR #57): frontend normalizes blank/zero/negative rent to `null` (omitted) in manual `/api/analyze`, manual memo/PDF metadata, and draft/finalize (shallow copy; draft state not mutated). This matches the backend's `None`-vs-not-`None` rent semantics; a `0` was previously sent as a real $0 rent and produced a false `Weak rent-to-cost for BRRRR` flag and "Rent provided" note. Backend rent logic unchanged.
+- Production QA passed against the locked demo set (obvious PASS $185K/$240K/$45K; corrected-offer BUY $135K/$240K/$45K with LTC 90%; clean BUY $200K/$345K/$50K with rent 0 omitted → BUY, confidence 93, MSO $212,300, net profit $50,150, 17.0% margin, 34.0% ROI, all stress BUY, no false rent flag). See frontend PROJECT_STATE.md for full detail — frontend is the primary source of truth.
+- Active phase: Demo Conversion Readiness. No backend work is approved.
