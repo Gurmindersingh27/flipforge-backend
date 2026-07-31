@@ -199,6 +199,7 @@ Do not touch pdf_service.py without explicitly flagging this risk first.
 - **Frontend:** Vercel (linked to GitHub)
 - **CORS:** Currently `allow_origins=["*"]` — tighten to Vercel domain once deployed
 - **Env var:** Frontend reads `VITE_API_BASE_URL` — must be set to live Render URL on Vercel
+- **Lender demo integrity fixes (2026-07-31, frontend-only, NO backend changes):** frontend PRs #56 (LTC display) and #57 (non-positive rent normalization) merged and production-tested. They aligned the UI to existing backend behavior — the 90% `loan_to_cost_pct` default (`app/models.py`) and the `est_monthly_rent is None` rent semantics (`app/analysis_engine.py`) — without modifying any backend source, model, schema, `AnalyzeRequest`, or API contract. Backend remains the source of truth for both. See frontend PROJECT_STATE.md for full detail.
 
 ---
 
