@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from datetime import date
 
 
 Severity = Literal["critical", "moderate", "mild"]
@@ -183,10 +184,45 @@ class NegotiationScriptResponse(BaseModel):
 # Saved Deals — persistence layer
 # ---------------------------------------------------------------------------
 
+class RehabScopeItem(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    category: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=1000)
+    quantity: float = Field(ge=0, le=1000000, allow_inf_nan=False)
+    unit: str = Field(default="allowance", max_length=40)
+    unit_cost: float = Field(ge=0, le=100000000, allow_inf_nan=False)
+    basis: Literal["allowance", "quote"] = "allowance"
+    source: str = Field(default="", max_length=500)
+    quote_date: Optional[date] = None
+    notes: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_quote(self):
+        if self.basis == "quote" and (not self.source.strip() or self.quote_date is None):
+            raise ValueError("Quoted items require a source and quote date.")
+        return self
+
+
+class RehabScope(BaseModel):
+    version: Literal[1] = 1
+    items: List[RehabScopeItem] = Field(default_factory=list, max_length=100)
+    contingency_pct: float = Field(default=0, ge=0, le=1, allow_inf_nan=False)
+    notes: str = Field(default="", max_length=4000)
+
+    @model_validator(mode="after")
+    def unique_items(self):
+        if len({item.id for item in self.items}) != len(self.items):
+            raise ValueError("Scope item IDs must be unique.")
+        return self
+
+
 class SaveDealRequest(BaseModel):
     address: Optional[str] = None
     draft_input: Optional[Dict[str, Any]] = None   # serialized DraftDeal
     analysis_result: Dict[str, Any]                # serialized AnalyzeResponse
+    rehab_scope: Optional[RehabScope] = None
+    parent_deal_id: Optional[int] = Field(default=None, gt=0)
+    revision_note: str = Field(default="", max_length=2000)
 
 
 class SavedDealResponse(BaseModel):
@@ -196,6 +232,9 @@ class SavedDealResponse(BaseModel):
     draft_input: Optional[Dict[str, Any]] = None
     analysis_result: Dict[str, Any]
     created_at: str   # ISO 8601 string
+    rehab_scope: Optional[RehabScope] = None
+    parent_deal_id: Optional[int] = None
+    revision_note: str = ""
 
 
 # ---------------------------------------------------------------------------

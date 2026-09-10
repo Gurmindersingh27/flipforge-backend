@@ -28,6 +28,8 @@ from .services.photo_rehab_service import analyze_photos
 from .db.init_db import init_db
 from .db.session import get_db
 from .db.models.saved_deal import SavedDeal
+from .db.models.deal_revision import DealRevision
+from .services.deal_revision_service import canonical_revision, deal_response
 from .auth import get_current_user_id, preload_jwks
 
 app = FastAPI(title="FlipForge API", version="0.1.0")
@@ -251,23 +253,32 @@ def save_deal(
     db: Session = Depends(get_db),
 ):
     """Save an analyzed deal for the authenticated user."""
+    if body.parent_deal_id is not None:
+        parent = db.query(SavedDeal).filter(
+            SavedDeal.id == body.parent_deal_id, SavedDeal.user_id == user_id
+        ).first()
+        if parent is None:
+            raise HTTPException(404, "Previous deal not found.")
+    analysis_result = body.analysis_result
+    if body.rehab_scope is not None or body.parent_deal_id is not None:
+        analysis_result = canonical_revision(body)
     record = SavedDeal(
         user_id=user_id,
         address=body.address,
         draft_input=body.draft_input,
-        analysis_result=body.analysis_result,
+        analysis_result=analysis_result,
     )
     db.add(record)
+    db.flush()
+    revision = DealRevision(
+        deal_id=record.id, parent_deal_id=body.parent_deal_id,
+        rehab_scope=body.rehab_scope.model_dump(mode="json") if body.rehab_scope is not None else None,
+        revision_note=body.revision_note,
+    )
+    db.add(revision)
     db.commit()
     db.refresh(record)
-    return SavedDealResponse(
-        id=record.id,
-        user_id=record.user_id,
-        address=record.address,
-        draft_input=record.draft_input,
-        analysis_result=record.analysis_result,
-        created_at=record.created_at.isoformat(),
-    )
+    return deal_response(record, revision)
 
 
 @app.get("/api/deals", response_model=list[SavedDealResponse])
@@ -282,17 +293,10 @@ def list_deals(
         .order_by(SavedDeal.created_at.desc())
         .all()
     )
-    return [
-        SavedDealResponse(
-            id=r.id,
-            user_id=r.user_id,
-            address=r.address,
-            draft_input=r.draft_input,
-            analysis_result=r.analysis_result,
-            created_at=r.created_at.isoformat(),
-        )
-        for r in records
-    ]
+    revisions = {r.deal_id: r for r in db.query(DealRevision).filter(
+        DealRevision.deal_id.in_([record.id for record in records])
+    ).all()}
+    return [deal_response(record, revisions.get(record.id)) for record in records]
 
 
 @app.get("/api/deals/{deal_id}", response_model=SavedDealResponse)
@@ -309,11 +313,4 @@ def get_deal(
     )
     if not record:
         raise HTTPException(status_code=404, detail="Deal not found.")
-    return SavedDealResponse(
-        id=record.id,
-        user_id=record.user_id,
-        address=record.address,
-        draft_input=record.draft_input,
-        analysis_result=record.analysis_result,
-        created_at=record.created_at.isoformat(),
-    )
+    return deal_response(record, db.get(DealRevision, record.id))
