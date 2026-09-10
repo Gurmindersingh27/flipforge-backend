@@ -518,3 +518,13 @@ All three states verified in production.
 - Non-positive rent (PR #57): frontend normalizes blank/zero/negative rent to `null` (omitted) in manual `/api/analyze`, manual memo/PDF metadata, and draft/finalize (shallow copy; draft state not mutated). This matches the backend's `None`-vs-not-`None` rent semantics; a `0` was previously sent as a real $0 rent and produced a false `Weak rent-to-cost for BRRRR` flag and "Rent provided" note. Backend rent logic unchanged.
 - Production QA passed against the locked demo set (obvious PASS $185K/$240K/$45K; corrected-offer BUY $135K/$240K/$45K with LTC 90%; clean BUY $200K/$345K/$50K with rent 0 omitted → BUY, confidence 93, MSO $212,300, net profit $50,150, 17.0% margin, 34.0% ROI, all stress BUY, no false rent flag). See frontend PROJECT_STATE.md for full detail — frontend is the primary source of truth.
 - Active phase: Demo Conversion Readiness. No backend work is approved.
+
+## 2026-09-10 — Rehab Budget + Revisions v1
+
+User approved implementing the persistent rehab budget and revision workflow. This is a product experiment; customer demand and local residential unit-cost calibration remain unproven.
+
+Backend adds validated scope items and quote provenance, optional parent-deal links, and an additive `deal_revisions` companion table created by existing startup initialization. Existing `saved_deals` columns and old records are unchanged. Save/read/list contracts gain optional fields. Parent links are owner-checked; scoped/revised saves recompute through the unchanged engine and reject scope/rehab mismatches. Earlier revisions remain immutable. Frontend shared types mirror these additions.
+
+Validation: 11 unittest integration/regression tests pass against isolated SQLite, including migration from an existing saved table, cross-user denial, malformed quote rejection, contingency rounding, full $50K to $67K + two-month revision, and locked PASS/BUY/BUY scenarios. Added Backend CI. No dependencies, engine, AnalyzeRequest, PDF service, or paid-provider integrations changed.
+
+Release status at commit: backend feature branch ready for PR/CI; deployment and frontend integration pending. Deploy backend and verify OpenAPI additions before releasing the frontend. PostgreSQL runtime and signed-in production QA are not claimed. Rollback application code without dropping the additive table; do not delete saved records.

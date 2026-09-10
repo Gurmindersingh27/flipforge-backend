@@ -1,6 +1,7 @@
 from app.db.base import Base
 from app.db.session import engine
 from app.db.models import Deal, DealAnalysis, SavedDeal  # noqa: F401 — registers tables
+from app.db.models.deal_revision import DealRevision  # noqa: F401
 
 
 def init_db():
