@@ -29,6 +29,13 @@ def verdict_from_score(score: int) -> Verdict:
         return "CONDITIONAL"
     return "PASS"
 
+
+def cap_verdict_for_required_return(verdict: Verdict, profit_pct: float, required_return: float) -> Verdict:
+    """A score cannot authorize BUY below the user's unrounded return target."""
+    if verdict == "BUY" and profit_pct < required_return:
+        return "CONDITIONAL"
+    return verdict
+
 @dataclass(frozen=True)
 class BaseMetrics:
     purchase_price: float
@@ -279,7 +286,9 @@ def build_stress_tests(req: AnalyzeRequest) -> List[StressTestScenario]:
         m = compute_base_metrics(stressed)
         # Verdict is based on stressed flip score (simple + consistent)
         score = compute_flip_score(stressed, m)
-        verdict = verdict_from_score(score)
+        verdict = cap_verdict_for_required_return(
+            verdict_from_score(score), m.profit_pct, float(req.required_profit_margin_pct or 0.0)
+        )
 
         out.append(
             StressTestScenario(
@@ -396,7 +405,10 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
 
     risk_codes, typed_flags = build_risk_flags(req, base, max_safe_offer)
 
-    flip_verdict = verdict_from_score(flip_score)
+    required_return = float(req.required_profit_margin_pct or 0.0)
+    flip_verdict = cap_verdict_for_required_return(
+        verdict_from_score(flip_score), base.profit_pct, required_return
+    )
     brrrr_verdict = verdict_from_score(brrrr_score)
     wholesale_verdict = verdict_from_score(wholesale_score)
 
@@ -405,7 +417,9 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
     if base.net_profit <= 0 and req.purchase_price > max_safe_offer:
         overall_verdict = "PASS"
     else:
-        overall_verdict = verdict_from_score(best_score)
+        overall_verdict = cap_verdict_for_required_return(
+            verdict_from_score(best_score), base.profit_pct, required_return
+        )
 
     allowed = outputs_allowed(overall_verdict)
 

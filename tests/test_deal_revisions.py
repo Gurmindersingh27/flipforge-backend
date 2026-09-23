@@ -91,6 +91,27 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/deals/save", json=body, headers={"X-Test-User": "bob"}).status_code, 404)
         self.assertEqual(self.client.get("/api/deals", headers={"X-Test-User": "bob"}).json(), [])
 
+    def test_old_buy_snapshot_survives_same_input_revision(self):
+        body = payload(67000, 8)
+        original = self.save(body)
+        # Seed a historical snapshot with the pre-policy labels. Reads must not recalculate it.
+        historical = copy.deepcopy(original["analysis_result"])
+        historical.update(overall_verdict="BUY", flip_verdict="BUY")
+        with self.Session() as db:
+            row = db.get(SavedDeal, original["id"])
+            row.analysis_result = historical
+            db.commit()
+        before = self.client.get(f'/api/deals/{original["id"]}').json()
+        self.assertEqual(before["analysis_result"], historical)
+        body["parent_deal_id"] = original["id"]
+        body["revision_note"] = "Same inputs, current verdict policy"
+        revised = self.save(body)
+        self.assertEqual(revised["analysis_result"]["overall_verdict"], "CONDITIONAL")
+        self.assertEqual(revised["analysis_result"]["net_profit"], historical["net_profit"])
+        self.assertEqual(revised["analysis_result"]["max_safe_offer"], historical["max_safe_offer"])
+        self.assertEqual(revised["parent_deal_id"], original["id"])
+        self.assertEqual(self.client.get(f'/api/deals/{original["id"]}').json(), before)
+
     def test_scope_mismatch_rejected_without_partial_save(self):
         body = payload()
         body["rehab_scope"]["items"][0]["unit_cost"] = 1

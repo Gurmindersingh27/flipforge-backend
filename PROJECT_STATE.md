@@ -4,7 +4,17 @@
 ---
 
 ## Last Updated
-2026-07-31
+2026-09-23
+
+## Current release delta (supersedes historical status below)
+
+- Deployed backend main is `efe27e032ef85dd130ec267e9166ce878fcdc1cc` (PR #18, Rehab Budget + Revisions). The older statements below that the backend has not changed since Photo Rehab v1 are historical.
+- Required-return verdict cap: implemented on a separate branch, not merged or deployed. Below the unrounded required return, BUY becomes CONDITIONAL for the overall verdict, flip verdict and each independently calculated stress scenario. Existing PASS and CONDITIONAL results never upgrade. The overall cap also applies when another strategy wins; BRRRR/wholesale scores and their strategy-specific labels are unchanged.
+- All dollar math, scores, contracts, owner checks and saved-record read behavior are unchanged. Confidence and breakpoint calculations are unchanged: BUY and CONDITIONAL both count as non-PASS. Lender report, negotiation and MAO output permissions remain enabled for CONDITIONAL.
+- Historical saved analyses retain their original verdicts. A new revision recomputes under the current policy, so identical inputs can show BUY to CONDITIONAL because of this policy change, not because a contractor quote changed. Comparison users must account for that historical-policy difference.
+- Local policy tests pass for the three public samples, locked S1/S2/S3, exact/adjacent thresholds, zero/null targets, existing hard PASS and a BRRRR winner. Six complete pre/post response comparisons found only permitted verdict-label changes. Full local API tests are blocked by missing FastAPI in this runtime; CI validation is pending.
+- Release HOLD: confirm the production DATABASE_URL target and durable storage before any backend merge/redeploy. The connector cannot read environment variables; an external Postgres database remains possible. No backend restart, migration or saved-data mutation has been performed.
+- Frontend PR #64 is merged as `c855182` and production-verified. Personal-account QA and durable-storage/backup verification remain open. No paying-user or repeat-use validation is established; outreach remains unsent.
 
 ---
 
