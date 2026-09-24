@@ -29,6 +29,19 @@ def verdict_from_score(score: int) -> Verdict:
         return "CONDITIONAL"
     return "PASS"
 
+
+def cap_verdict_for_required_return(
+    verdict: Verdict, profit_pct: float, required_return: float,
+    *, purchase_price: float | None = None, max_safe_offer: float | None = None,
+) -> Verdict:
+    """Honor the target, allowing only the existing rounded offer ceiling."""
+    if verdict == "BUY" and profit_pct < required_return:
+        if (profit_pct >= 0 and purchase_price is not None and max_safe_offer is not None
+                and max_safe_offer > 0 and purchase_price <= max_safe_offer):
+            return verdict
+        return "CONDITIONAL"
+    return verdict
+
 @dataclass(frozen=True)
 class BaseMetrics:
     purchase_price: float
@@ -279,7 +292,10 @@ def build_stress_tests(req: AnalyzeRequest) -> List[StressTestScenario]:
         m = compute_base_metrics(stressed)
         # Verdict is based on stressed flip score (simple + consistent)
         score = compute_flip_score(stressed, m)
-        verdict = verdict_from_score(score)
+        verdict = cap_verdict_for_required_return(
+            verdict_from_score(score), m.profit_pct, float(req.required_profit_margin_pct or 0.0),
+            purchase_price=stressed.purchase_price, max_safe_offer=compute_max_safe_offer(stressed),
+        )
 
         out.append(
             StressTestScenario(
@@ -367,7 +383,10 @@ def build_notes(req: AnalyzeRequest, m: BaseMetrics, max_safe_offer: float) -> L
     if m.net_profit <= 0:
         notes.append("Deal is underwater after realistic costs. This is a PASS unless terms change.")
     elif m.profit_pct < float(req.required_profit_margin_pct or 0.0):
-        notes.append("Margin is below your required threshold. Consider lowering offer or tightening rehab assumptions.")
+        if max_safe_offer > 0 and req.purchase_price <= max_safe_offer:
+            notes.append("Return is slightly below your target because Max Safe Offer is rounded to the nearest $100. Lower the offer to meet the exact target.")
+        else:
+            notes.append("Margin is below your required threshold. Consider lowering offer or tightening rehab assumptions.")
     else:
         notes.append("Numbers pencil if assumptions are real. Verify ARV and rehab before moving.")
 
@@ -396,7 +415,11 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
 
     risk_codes, typed_flags = build_risk_flags(req, base, max_safe_offer)
 
-    flip_verdict = verdict_from_score(flip_score)
+    required_return = float(req.required_profit_margin_pct or 0.0)
+    flip_verdict = cap_verdict_for_required_return(
+        verdict_from_score(flip_score), base.profit_pct, required_return,
+        purchase_price=req.purchase_price, max_safe_offer=max_safe_offer,
+    )
     brrrr_verdict = verdict_from_score(brrrr_score)
     wholesale_verdict = verdict_from_score(wholesale_score)
 
@@ -405,7 +428,10 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
     if base.net_profit <= 0 and req.purchase_price > max_safe_offer:
         overall_verdict = "PASS"
     else:
-        overall_verdict = verdict_from_score(best_score)
+        overall_verdict = cap_verdict_for_required_return(
+            verdict_from_score(best_score), base.profit_pct, required_return,
+            purchase_price=req.purchase_price, max_safe_offer=max_safe_offer,
+        )
 
     allowed = outputs_allowed(overall_verdict)
 
@@ -419,6 +445,8 @@ def analyze_deal(req: AnalyzeRequest) -> AnalyzeResponse:
     assignment_spread = max_safe_offer - req.purchase_price if max_safe_offer > 0 else None
 
     notes = build_notes(req, base, max_safe_offer)
+    if best != "flip" and best_score >= 75 and overall_verdict == "CONDITIONAL":
+        notes.append("The overall decision is CONDITIONAL because the modeled resale return misses your required return. The selected strategy's BUY label reflects its separate score, not satisfaction of that return target.")
 
     rehab_reality = compute_rehab_reality(req)
     breakpoints = compute_breakpoints(req, stress)
