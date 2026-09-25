@@ -7,6 +7,10 @@ engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {},
     future=True,
+    # Remote servers can close idle sockets. Check before checkout, not by
+    # replaying transactions; SQLite retains its existing pool behavior.
+    pool_pre_ping=not settings.DATABASE_URL.startswith("sqlite"),
+    pool_recycle=300 if not settings.DATABASE_URL.startswith("sqlite") else -1,
 )
 
 SessionLocal = sessionmaker(
