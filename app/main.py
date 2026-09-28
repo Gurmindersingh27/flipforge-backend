@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, File, Form, HTTPException, Depends, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Depends, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -31,6 +31,7 @@ from .db.models.saved_deal import SavedDeal
 from .db.models.deal_revision import DealRevision
 from .services.deal_revision_service import canonical_revision, deal_response
 from .auth import get_current_user_id, preload_jwks
+from .core.provider_usage import client_key, photo_usage, address_usage
 
 app = FastAPI(title="FlipForge API", version="0.1.0")
 
@@ -166,7 +167,7 @@ def generate_negotiation_script_endpoint(body: NegotiationScriptRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/enrich-address", response_model=EnrichAddressResponse)
-def enrich_address_endpoint(body: EnrichAddressRequest, db: Session = Depends(get_db)):
+def enrich_address_endpoint(body: EnrichAddressRequest, request: Request, db: Session = Depends(get_db)):
     """
     Look up property facts, AVM value estimate, and rent estimate from RentCast.
     Returns raw data signals only — no ARV labels, no verdict logic.
@@ -174,9 +175,12 @@ def enrich_address_endpoint(body: EnrichAddressRequest, db: Session = Depends(ge
     Responses are cached 30 days per normalized address.
     provider_status indicates: cache_hit | live_success | quota_exhausted | provider_unavailable.
     """
+    key = client_key(request)
+    address_usage.check(key)
     address = body.clean_address()
     if not address:
         raise HTTPException(status_code=422, detail="address must not be blank.")
+    address_usage.consume(key)
     return enrich_address(address, db)
 
 
@@ -191,6 +195,7 @@ MAX_PHOTOS = 8
 
 @app.post("/api/photo-rehab-analysis", response_model=PhotoRehabAnalysisResponse)
 async def photo_rehab_analysis(
+    request: Request,
     photos: list[UploadFile] = File(...),
     sqft: int | None = Form(default=None),
     region: str | None = Form(default=None),
@@ -202,6 +207,8 @@ async def photo_rehab_analysis(
     AI identifies condition/severity; backend controls all dollar estimates.
     Photos are processed in-memory only — never stored.
     """
+    key = client_key(request)
+    photo_usage.check(key)
     if not photos or len(photos) < 1:
         raise HTTPException(status_code=422, detail="At least 1 photo is required.")
     if len(photos) > MAX_PHOTOS:
@@ -229,6 +236,7 @@ async def photo_rehab_analysis(
 
         images.append((data, content_type))
 
+    photo_usage.consume(key)
     result = analyze_photos(
         images=images,
         sqft=sqft,

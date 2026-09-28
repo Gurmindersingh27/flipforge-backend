@@ -4,9 +4,31 @@
 ---
 
 ## Last Updated
-2026-09-23
+2026-09-28
 
-## Current release delta (supersedes historical status below)
+## Provider usage caps (current branch; supersedes conflicting history below)
+
+- Base/main: `14a7dcedbe4ef2c914ea786122bdff88a2a5e35f` (#21). Required-return policy (#20) and remote DB pool recovery (#21) are already merged. Frontend #71 merged separately at `aa29ff51ed5719c12c15e802982ed91dd469b248`.
+- Branch: `codex/provider-usage-caps`. Approved four-file implementation scope; independent Claude review of the published exact head is required before merge. These caps are not yet deployed.
+- **Limits admitted requests per process; resets on restart; not a spend ceiling.** Current render.yaml starts one Uvicorn process. Separate workers/instances each get independent counters. Restart or redeploy replenishes counters, including during the same UTC day.
+
+| Route | Per client, 600 seconds from first counted request | Per UTC day, all clients | Environment overrides |
+|---|---:|---:|---|
+| `/api/photo-rehab-analysis` | 3 | 20 | `PHOTO_REHAB_CLIENT_LIMIT`, `PHOTO_REHAB_DAILY_LIMIT` |
+| `/api/enrich-address` | 10 | 30 | `RENTCAST_CLIENT_LIMIT`, `RENTCAST_DAILY_LIMIT` |
+
+- Overrides are read at process startup. Positive integers 1..1000000 are accepted. Invalid, zero, negative, empty or out-of-range settings log a warning naming the setting (not its contents) and use the listed default; they do not prevent startup. There is no disable/unlimited sentinel.
+- Each route checks availability without reserving a slot. After existing request validation, immediately before its service call, a lock-protected operation rechecks and increments both the client and daily counters atomically. Validation failures and limiter rejections do not consume usage. Concurrent requests can pass the advisory check but cannot overrun the final count.
+- Cache hits, service failures, and unconfigured providers consume a slot once dispatched. No automatic retries or refunds are added. Address counting happens before the existing cache lookup; exhausted caps therefore also block cache hits. One uncached lookup can issue three RentCast HTTP calls. Anthropic SDK retries remain unchanged, so an admitted photo request is not a promise of one upstream attempt or a fixed charge.
+- Client key: canonical leftmost IP in one `X-Forwarded-For` header. All comma-separated entries must be valid IP literals, at most 32 entries and 4096 header characters. Ports, zone IDs, empty/invalid entries, duplicate headers, missing headers and oversize chains use one shared `unknown-client` bucket. IPv4-mapped IPv6 normalizes to IPv4. No socket-IP fallback. This untrusted header is spoofable; the daily cap is independent of the key. NAT users share a client window. These keys are never used for auth or ownership.
+- HTTP 429 uses the existing `detail` error body and `Retry-After` header: rounded-up seconds remaining in the fixed client window, or until next 00:00 UTC for a daily rejection. Daily exhaustion takes precedence when both limits are exhausted. A backward wall-clock change cannot reset daily usage. Existing CORS still applies to errors. Frontend currently displays the raw error body; cleaner messaging is a separate frontend follow-up.
+- In-memory client tables are bounded to 4096 entries per route. Expired windows are removed lazily on the next check/consume; rejected keys are not inserted. If full with active entries, new keys get 429 until the earliest expiry rather than evicting active counters. No IP keys are written to the database or logged by this limiter; idle-process stale keys can remain in memory until another request or process termination. No background cleanup job exists.
+- Scope unchanged: sign-in behavior, dependencies, provider implementations, schemas/AnalyzeRequest, math, snapshots, stored records and ownership. Only the two paid-provider routes are limited. Photo limits are checked after framework multipart parsing; this is not an upload-body-size firewall.
+- Validation: 36 backend tests pass (23 existing + 13 new). New coverage includes both real routes with provider stubs, invalid inputs, shared fallback, spoofing versus daily limits, cache/failure accounting, CORS, Retry-After, midnight/window boundaries, clock rollback, bounded memory and invalid settings. For EACH route and EACH limit, 12 concurrent requests all pass precheck, then exactly 3 reach the provider stub and 9 receive 429. Tests make no paid provider calls and use no production credentials. Frontend regression results are recorded in the PR.
+- Operational follow-up: verify actual RentCast quota and Anthropic spending controls before promotion; no console settings changed here. Defaults allow up to 90 RentCast calls/day without cache hits, before restart/multi-process caveats. No guaranteed monthly cost is established.
+- Data-note correction: lookup results are reused for 30 days and may remain in the database after that; no expiry deletion job exists. Lender PDF export exists, but full account-data export and self-serve deletion do not. No new deletion/export promise is established by this PR.
+
+## Historical September 23 release delta (superseded by current status above)
 
 - Deployed backend main is `efe27e032ef85dd130ec267e9166ce878fcdc1cc` (PR #18, Rehab Budget + Revisions). The older statements below that the backend has not changed since Photo Rehab v1 are historical.
 - Required-return verdict cap: implemented on a separate branch, not merged or deployed. Below the required return, BUY becomes CONDITIONAL for the overall verdict, flip verdict and each independently calculated stress scenario. Existing PASS and CONDITIONAL results never upgrade. The overall cap also applies when another strategy wins; BRRRR/wholesale scores and their strategy-specific labels are unchanged.
