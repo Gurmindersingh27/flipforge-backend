@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from app.analysis_engine import analyze_deal
 from app.models import AnalyzeRequest
-from app.services.pdf_service import _fmt_usd, generate_lender_report
+from app.services.pdf_service import _fmt_usd, _styles, generate_lender_report
 
 
 class PdfMoneyFormattingTests(unittest.TestCase):
@@ -53,6 +53,37 @@ class PdfMoneyFormattingTests(unittest.TestCase):
         self.assertTrue(pdf.startswith(b"%PDF"))
         self.assertEqual(result.model_dump(), original_result)
         self.assertEqual(meta, original_meta)
+
+
+class PdfVerdictLayoutTests(unittest.TestCase):
+    def test_verdict_line_height_reserves_room_for_large_text(self):
+        style = _styles()["verdict"]
+        self.assertGreaterEqual(style.leading, style.fontSize * 1.2)
+
+    def test_all_verdicts_generate_reports_without_mutating_inputs(self):
+        cases = [("BUY", 135000, 240000, 45000, 6),
+                 ("CONDITIONAL", 150000, 270000, 67000, 8),
+                 ("PASS", 185000, 240000, 45000, 6)]
+        for verdict, price, arv, rehab, months in cases:
+            with self.subTest(verdict=verdict):
+                result = analyze_deal(AnalyzeRequest(
+                    purchase_price=price, arv=arv,
+                    rehab_budget=rehab, holding_months=months,
+                ))
+                self.assertEqual(result.overall_verdict, verdict)
+                meta = {"property_address": "Verdict layout fixture",
+                        "purchase_price": price, "arv": arv,
+                        "rehab_budget": rehab, "holding_months": months,
+                        "interest_rate_pct": 10, "ltc_pct": 90}
+                original_result = copy.deepcopy(result.model_dump())
+                original_meta = copy.deepcopy(meta)
+
+                pdf = generate_lender_report(result, meta)
+
+                self.assertIsInstance(pdf, bytes)
+                self.assertTrue(pdf.startswith(b"%PDF"))
+                self.assertEqual(result.model_dump(), original_result)
+                self.assertEqual(meta, original_meta)
 
 
 if __name__ == "__main__":
