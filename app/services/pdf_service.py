@@ -15,6 +15,7 @@ Returns raw bytes — caller sets Content-Type: application/pdf.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from io import BytesIO
 from typing import Any, Dict
 
@@ -72,8 +73,15 @@ def _verdict_color_rl(v: str) -> Any:
 
 def _fmt_usd(v: Any) -> str:
     try:
-        return f"${float(v):,.0f}"
-    except (TypeError, ValueError):
+        amount = Decimal(str(v))
+        if not amount.is_finite():
+            return "—"
+        rounded = amount.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        if rounded == 0:
+            rounded = Decimal(0)
+        prefix = "-$" if rounded < 0 else "$"
+        return f"{prefix}{abs(rounded):,f}"
+    except (TypeError, ValueError, InvalidOperation):
         return "—"
 
 
