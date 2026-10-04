@@ -149,7 +149,8 @@ def _styles() -> dict:
             parent=base["Normal"],
             fontSize=22,
             fontName="Helvetica-Bold",
-            spaceAfter=4,
+            leading=28,
+            spaceAfter=8,
         ),
         "flag": ParagraphStyle(
             "ff_flag",
