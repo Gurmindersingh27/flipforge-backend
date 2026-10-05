@@ -20,6 +20,8 @@ from .models import (
     SavedDealResponse,
 )
 from .analysis_engine import analyze_deal
+from .item_analysis_engine import analyze_item
+from .item_models import ItemAnalyzeRequest, ItemAnalyzeResponse
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
@@ -65,6 +67,11 @@ def health():
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
     return analyze_deal(req)
+
+
+@app.post("/api/items/analyze", response_model=ItemAnalyzeResponse)
+def analyze_item_endpoint(req: ItemAnalyzeRequest):
+    return analyze_item(req)
 
 
 # ---------------------------------------------------------------------------
