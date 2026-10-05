@@ -243,9 +243,9 @@ def generate_lender_report(result: AnalyzeResponse, meta: Dict[str, Any]) -> byt
     # -----------------------------------------------------------------------
     story.append(Paragraph("Deal Overview", s["section"]))
 
-    pp    = meta.get("purchase_price") or result.total_project_cost
+    pp    = meta.get("purchase_price")
     arv   = meta.get("arv") or "—"
-    rehab = meta.get("rehab_budget") or "—"
+    rehab = meta.get("rehab_budget")
     rent  = meta.get("est_monthly_rent")
 
     story.append(_kv_table([
