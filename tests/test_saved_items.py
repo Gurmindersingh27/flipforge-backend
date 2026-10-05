@@ -79,6 +79,33 @@ class SavedItemsTests(unittest.TestCase):
         with self.Session() as db:
             return db.query(SavedItem).count()
 
+    def test_nul_in_saved_text_is_rejected_without_creating_rows(self):
+        existing = self.save()
+        for field in ("notes", "item_name", "category"):
+            for value in ("\x00text", "te\x00xt", "text\x00"):
+                with self.subTest(field=field, value=value):
+                    payload = {"inputs": dresser()}
+                    if field == "notes":
+                        payload[field] = value
+                    else:
+                        payload["inputs"][field] = value
+                    response = self.client.post("/api/items/save", json=payload)
+                    self.assertEqual(response.status_code, 422, response.text)
+                    self.assertIn(field, response.text)
+                    self.assertIn("NUL", response.text)
+                    self.assertEqual(self.count(), 1)
+        self.assertEqual(self.client.get(f"/api/items/{existing['id']}").json(), existing)
+
+    def test_save_text_validation_preserves_allowed_text_and_public_analyze(self):
+        text = "Dresser\nwood\tfinish 🪑"
+        saved = self.save(inputs={**dresser(), "item_name": text, "category": text}, notes=text)
+        self.assertEqual(saved["notes"], text)
+        self.assertEqual(saved["inputs"]["item_name"], text)
+        self.assertEqual(saved["inputs"]["category"], text)
+        response = self.client.post("/api/items/analyze", json={
+            **dresser(), "item_name": "name\x00", "category": "category\x00"})
+        self.assertEqual(response.status_code, 200, response.text)
+
     def test_existing_database_adds_only_items_and_preserves_house(self):
         after = self.schema()
         self.assertEqual(set(after) - set(self.before_schema), {"saved_items"})

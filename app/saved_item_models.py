@@ -30,6 +30,23 @@ class SaveItemRequest(ItemInputModel):
     notes: Annotated[StrictStr, Field(max_length=5000)] | None = None
     parent_item_id: ItemId | None = None
 
+    @field_validator("notes")
+    @classmethod
+    def notes_without_nul(cls, value):
+        if value is not None and "\x00" in value:
+            raise ValueError("notes must not contain NUL characters")
+        return value
+
+    @field_validator("inputs")
+    @classmethod
+    def inputs_without_nul(cls, value):
+        # PostgreSQL rejects NUL in JSON as well as text. Keep this save-only.
+        for field in ("item_name", "category"):
+            text = getattr(value, field)
+            if text is not None and "\x00" in text:
+                raise ValueError(f"inputs.{field} must not contain NUL characters")
+        return value
+
     @field_validator("listing_url")
     @classmethod
     def safe_listing_url(cls, value):
