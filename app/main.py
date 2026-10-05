@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, File, Form, HTTPException, Depends, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Depends, Path, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -22,6 +22,8 @@ from .models import (
 from .analysis_engine import analyze_deal
 from .item_analysis_engine import analyze_item
 from .item_models import ItemAnalyzeRequest, ItemAnalyzeResponse
+from .saved_item_models import SaveItemRequest, SavedItemResponse, SavedItemListResponse
+from .services.saved_item_service import save_item, list_items, owned_item, item_response
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
@@ -72,6 +74,34 @@ def analyze(req: AnalyzeRequest):
 @app.post("/api/items/analyze", response_model=ItemAnalyzeResponse)
 def analyze_item_endpoint(req: ItemAnalyzeRequest):
     return analyze_item(req)
+
+
+@app.post("/api/items/save", response_model=SavedItemResponse, status_code=201)
+def save_item_endpoint(
+    body: SaveItemRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return save_item(db, user_id, body)
+
+
+@app.get("/api/items", response_model=SavedItemListResponse)
+def list_items_endpoint(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return list_items(db, user_id, limit, offset)
+
+
+@app.get("/api/items/{item_id}", response_model=SavedItemResponse)
+def get_item_endpoint(
+    item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return item_response(owned_item(db, user_id, item_id))
 
 
 # ---------------------------------------------------------------------------
