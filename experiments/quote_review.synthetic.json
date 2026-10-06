@@ -1,0 +1,216 @@
+{
+  "fixture_origin": "SYNTHETIC \u2014 not real contractors, prices or customer evidence",
+  "baseline": {
+    "id": 1,
+    "address": "Synthetic kitchen study",
+    "draft_input": {
+      "source": "manual",
+      "purchase_price": {
+        "value": 150000,
+        "confidence": "HIGH",
+        "source": "synthetic fixture"
+      },
+      "arv": {
+        "value": 270000,
+        "confidence": "HIGH",
+        "source": "synthetic fixture"
+      },
+      "rehab_budget": {
+        "value": 35200,
+        "confidence": "HIGH",
+        "source": "synthetic fixture"
+      },
+      "est_monthly_rent": {
+        "value": null,
+        "confidence": "HIGH",
+        "source": "synthetic fixture"
+      },
+      "closing_cost_pct": 0.03,
+      "selling_cost_pct": 0.08,
+      "holding_months": 6,
+      "annual_interest_rate": 0.1,
+      "loan_to_cost_pct": 0.9,
+      "required_profit_margin_pct": 0.12
+    },
+    "rehab_scope": {
+      "version": 1,
+      "items": [
+        {
+          "id": "kitchen",
+          "category": "Kitchen",
+          "description": "Synthetic planning allowance",
+          "quantity": 1,
+          "unit": "allowance",
+          "unit_cost": 20000,
+          "basis": "allowance",
+          "source": "Synthetic fixture",
+          "quote_date": null,
+          "notes": ""
+        },
+        {
+          "id": "roof",
+          "category": "Roof",
+          "description": "Synthetic planning allowance",
+          "quantity": 1,
+          "unit": "allowance",
+          "unit_cost": 12000,
+          "basis": "allowance",
+          "source": "Synthetic fixture",
+          "quote_date": null,
+          "notes": ""
+        }
+      ],
+      "contingency_pct": 0.1,
+      "notes": "Synthetic baseline; roof remains in scope."
+    }
+  },
+  "replace_item_ids": [
+    "kitchen"
+  ],
+  "overlap_reviewed": true,
+  "contingency_review_note": "Reviewer confirms quote prices contain no separate project reserve. Retain the existing 10% owner reserve once.",
+  "requirements": [
+    {
+      "id": "demo",
+      "label": "Demolition and disposal"
+    },
+    {
+      "id": "cabinets",
+      "label": "Cabinets and installation"
+    },
+    {
+      "id": "tops",
+      "label": "Countertops"
+    },
+    {
+      "id": "plumbing",
+      "label": "Plumbing reconnection"
+    },
+    {
+      "id": "finish",
+      "label": "Finish repairs"
+    }
+  ],
+  "options": [
+    {
+      "id": "contractor-a",
+      "label": "Synthetic Contractor A",
+      "source": "Synthetic quote A \u2014 test data",
+      "quote_date": "2026-09-11",
+      "quote_text": "Cabinets installed and countertops supplied. Demolition and disposal excluded. Plumbing reconnection by owner. Finish repairs excluded.",
+      "quoted_total": 14000,
+      "rows": [
+        {
+          "id": "demo",
+          "status": "excluded",
+          "evidence": "Demolition and disposal excluded.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "allowance",
+          "additional_amount": 3000,
+          "resolution_note": "Synthetic owner allowance pending a demolition quote."
+        },
+        {
+          "id": "cabinets",
+          "status": "included",
+          "evidence": "Cabinets installed and countertops supplied.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "tops",
+          "status": "included",
+          "evidence": "Cabinets installed and countertops supplied.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "plumbing",
+          "status": "excluded",
+          "evidence": "Plumbing reconnection by owner.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "allowance",
+          "additional_amount": 2200,
+          "resolution_note": "Synthetic plumbing allowance; not a quote."
+        },
+        {
+          "id": "finish",
+          "status": "excluded",
+          "evidence": "Finish repairs excluded.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "allowance",
+          "additional_amount": 1300,
+          "resolution_note": "Synthetic finish allowance; not a quote."
+        }
+      ]
+    },
+    {
+      "id": "contractor-b",
+      "label": "Synthetic Contractor B",
+      "source": "Synthetic quote B \u2014 test data",
+      "quote_date": "2026-09-11",
+      "quote_text": "Demolition, disposal, cabinets installed and countertops included. Plumbing reconnection included. Finish repairs by owner.",
+      "quoted_total": 18000,
+      "rows": [
+        {
+          "id": "demo",
+          "status": "included",
+          "evidence": "Demolition, disposal, cabinets installed and countertops included.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "cabinets",
+          "status": "included",
+          "evidence": "Demolition, disposal, cabinets installed and countertops included.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "tops",
+          "status": "included",
+          "evidence": "Demolition, disposal, cabinets installed and countertops included.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "plumbing",
+          "status": "included",
+          "evidence": "Plumbing reconnection included.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "in_quote",
+          "additional_amount": null,
+          "resolution_note": ""
+        },
+        {
+          "id": "finish",
+          "status": "excluded",
+          "evidence": "Finish repairs by owner.",
+          "evidence_origin": "quote_text",
+          "locator": "Synthetic quote, paragraph 1",
+          "resolution": "allowance",
+          "additional_amount": 1300,
+          "resolution_note": "Synthetic finish allowance; not a quote."
+        }
+      ]
+    }
+  ]
+}
