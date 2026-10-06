@@ -3,10 +3,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import Field, HttpUrl, JsonValue, StrictInt, StrictStr, TypeAdapter, field_serializer, field_validator
 
 from .item_models import ItemAnalyzeRequest, ItemAnalyzeResponse, ItemInputModel, ItemOutputModel
+from .item_assessment_models import AssessmentConfirmation
 
 
 ItemId = Annotated[StrictInt, Field(gt=0)]
@@ -29,6 +31,8 @@ class SaveItemRequest(ItemInputModel):
     listing_url: Annotated[StrictStr, Field(max_length=2048)] | None = None
     notes: Annotated[StrictStr, Field(max_length=5000)] | None = None
     parent_item_id: ItemId | None = None
+    assessment_id: UUID | None = None
+    assessment_confirmation: AssessmentConfirmation | None = None
 
     @field_validator("notes")
     @classmethod
@@ -80,6 +84,7 @@ class SavedItemResponse(ItemOutputModel):
     analysis_result: ItemAnalyzeResponse
     listing_url: str | None
     notes: str | None
+    assessment: dict[str, JsonValue] | None = None
 
     @field_serializer("created_at")
     def serialize_created_at(self, value):

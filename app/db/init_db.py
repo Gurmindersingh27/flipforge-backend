@@ -3,6 +3,8 @@ from app.db.session import engine
 from app.db.models import Deal, DealAnalysis, SavedDeal  # noqa: F401 — registers tables
 from app.db.models.deal_revision import DealRevision  # noqa: F401
 from app.db.models.saved_item import SavedItem  # noqa: F401
+from app.db.models.item_assessment import ItemAssessment, SavedItemAssessment  # noqa: F401
+from app.db.models.item_ai_budget import ItemAIGate, ItemAIMonth  # noqa: F401
 
 
 def init_db():
