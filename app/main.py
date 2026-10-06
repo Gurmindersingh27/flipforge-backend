@@ -36,6 +36,10 @@ from .db.models.deal_revision import DealRevision
 from .services.deal_revision_service import canonical_revision, deal_response
 from .auth import get_current_user_id, preload_jwks
 from .core.provider_usage import client_key, photo_usage, address_usage
+from .item_assessment_models import ItemAssessmentRequest, ItemAssessmentResponse, BudgetResponse
+from .services.item_assessment_service import assess, assessment_response, owned_assessment, require_pilot, configured
+from .services.item_ai_budget_service import budget_status
+from uuid import UUID
 
 app = FastAPI(title="FlipForge API", version="0.1.0")
 
@@ -93,6 +97,33 @@ def list_items_endpoint(
     db: Session = Depends(get_db),
 ):
     return list_items(db, user_id, limit, offset)
+
+
+@app.post("/api/items/assess", response_model=ItemAssessmentResponse)
+def assess_item_endpoint(
+    body: ItemAssessmentRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return assess(db, user_id, body)
+
+
+@app.get("/api/items/assessments/{assessment_id}", response_model=ItemAssessmentResponse)
+def get_item_assessment_endpoint(
+    assessment_id: UUID,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return assessment_response(owned_assessment(db, user_id, str(assessment_id)))
+
+
+@app.get("/api/items/ai-budget", response_model=BudgetResponse)
+def get_items_ai_budget_endpoint(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    require_pilot(user_id)
+    return budget_status(db, configured())
 
 
 @app.get("/api/items/{item_id}", response_model=SavedItemResponse)
