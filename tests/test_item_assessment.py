@@ -123,6 +123,81 @@ class AssessmentTests(unittest.TestCase):
                 self.assertEqual(self.client.post('/api/items/assess', json=request_body()).status_code, 503)
                 call.assert_not_called()
 
+    def test_draft2_gate_rejects_old_or_near_match_approval_before_reservation(self):
+        from app.db.models.item_ai_budget import ItemAIMonth
+        self.assertEqual(VERSION, "2026-10-06-draft2")
+        for approval in ["2026-10-06-draft1", "2026-10-06-draft2 ", "2026-10-06-DRAFT2"]:
+            with self.subTest(approval=approval), patch.dict(os.environ, {"ITEMS_REPAIR_CATALOG_APPROVED": approval}), \
+                    patch("app.services.item_assessment_service.call_provider") as call:
+                self.assertEqual(self.client.post('/api/items/assess', json=request_body()).status_code, 503)
+                self.assertEqual(self.client.get('/api/items/ai-budget').json()["reason"], "not_configured")
+                call.assert_not_called()
+        with self.Session() as db:
+            self.assertEqual(db.query(ItemAssessment).count(), 0)
+            self.assertEqual(db.query(ItemAIMonth).count(), 0)
+
+    def test_prompt_contains_every_job_scope_without_prices_or_changed_provider_caps(self):
+        _, call = self.run_assessment()
+        payload = call.call_args.args[0]
+        prompt = payload["system"]
+        catalog, _ = json.JSONDecoder().raw_decode(prompt.split("Select repair job IDs from this catalog: ", 1)[1])
+        scopes = {job["job_id"]: job["scope"] for job in catalog}
+        self.assertEqual(set(scopes), {"clean", "scratch_touchup", "sand_seat", "refinish_top", "paint_chair",
+                                     "paint_dresser", "replace_knobs", "glue_joint", "seat_fabric", "replace_glides"})
+        for job in catalog:
+            self.assertEqual(set(job), {"job_id", "label", "scope"})
+            self.assertTrue(job["scope"])
+        for job in ("sand_seat", "refinish_top"):
+            self.assertIn("This surface only", scopes[job])
+            self.assertIn("stripping", scopes[job])
+            self.assertIn("veneer damage", scopes[job])
+        self.assertIn("veneer damage", scopes["paint_dresser"])
+        self.assertIn("routine cleaning", scopes["paint_chair"])
+        self.assertIn("reuses sound foam and base", scopes["seat_fabric"])
+        self.assertIn("excludes replacement wooden feet", scopes["replace_glides"])
+        self.assertIn("Return every applicable job; the server handles included work", prompt)
+        self.assertIn("Put work outside these scopes", prompt)
+        self.assertIn("Never calculate resale ranges, offers, profits, costs, or buy/pass decisions", prompt)
+        self.assertEqual(payload["max_tokens"], 2500)
+        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
+        self.assertEqual(payload["model"], "claude-sonnet-4-5-20250929")
+
+    def test_overlap_returns_unknown_empty_budget_and_saves_one_custom_total_with_evidence(self):
+        raw = provider_response()
+        report = json.loads(raw["content"][0]["text"])
+        report["repairs"] = [dict(job_id=job, reason=f"Visible {job}")
+                             for job in ("clean", "paint_dresser", "refinish_top")]
+        raw["content"][0]["text"] = json.dumps(report)
+        assessed, _ = self.run_assessment(raw=raw)
+        evidence = assessed["result"]
+        self.assertEqual(evidence["repair_catalog_version"], "2026-10-06-draft2")
+        self.assertEqual(len(evidence["repair_unknowns"]), 1)
+        self.assertIn("enter one total repair budget", evidence["repair_unknowns"][0])
+        # The frontend restores these inputs and follows repair_unknowns straight
+        # to an empty custom-budget field, never the $80 suggestion-sum button.
+        self.assertIsNone(evidence["inputs"]["repairs"])
+        self.assertEqual(evidence["analysis_result"]["status"], "needs_info")
+        self.assertEqual(evidence["analysis_result"]["missing_inputs"], ["repairs"])
+        self.assertIsNone(evidence["analysis_result"]["low"])
+        rows = evidence["repair_suggestions"]
+        self.assertEqual([r["materials_cost"] for r in rows], [0, 50, 30])
+        self.assertIn("Included in Prep and paint a small dresser", rows[0]["label"])
+        self.assertEqual([r["reason"] for r in rows], ["Visible clean", "Visible paint_dresser", "Visible refinish_top"])
+        body = dict(inputs={**evidence["inputs"], "repairs": 72}, assessment_id=assessed["id"],
+                    assessment_confirmation=dict(repairs=[dict(job_id="custom", materials_cost=72)],
+                                                 resale_source="assessment", preset_acknowledged=True))
+        with patch("app.services.item_assessment_service.call_provider") as call:
+            saved = self.client.post('/api/items/save', json=body)
+            self.assertEqual(saved.status_code, 201, saved.text)
+            saved = saved.json()
+            self.assertEqual(saved["inputs"]["repairs"], 72)
+            self.assertEqual(saved["assessment"]["evidence"], evidence)
+            self.assertEqual(saved["assessment"]["confirmation"]["repairs"], [{"job_id": "custom", "materials_cost": 72}])
+            self.assertEqual(self.client.get(f'/api/items/{saved["id"]}').json(), saved)
+            body["inputs"]["repairs"] = 80
+            self.assertEqual(self.client.post('/api/items/save', json=body).status_code, 422)
+            call.assert_not_called()
+
     def test_http_uses_dedicated_key_and_only_one_post_without_provider_retry(self):
         raw = provider_response()
         response = httpx.Response(200, json=raw, headers={"anthropic-workspace-id": "wrkspc_test"},
@@ -325,6 +400,46 @@ class AssessmentTests(unittest.TestCase):
         return dict(inputs={**assessed["result"]["inputs"], "repairs": 15}, assessment_id=assessed["id"],
                     assessment_confirmation=dict(repairs=[dict(job_id="sand_seat", materials_cost=15)],
                         resale_source="assessment", preset_acknowledged=True))
+
+    def test_draft1_assessment_and_saved_versions_keep_original_prices_and_evidence(self):
+        # Simulate a pre-upgrade assessment and save. Draft1 charged all three
+        # jobs (5 + 35 + 25), had no scope labels and no overlap unknown.
+        legacy_rows = [dict(job_id=job, label=label, materials_cost=amount,
+                            reason=f"Legacy observation for {job}", confirmed=False)
+                       for job, label, amount in [
+                           ("clean", "Clean and degrease", 5),
+                           ("paint_dresser", "Prep and paint a small dresser", 35),
+                           ("refinish_top", "Sand and refinish a small top", 25)]]
+        request = request_body()
+        with patch("app.services.item_assessment_service.VERSION", "2026-10-06-draft1"), \
+                patch.dict(os.environ, {"ITEMS_REPAIR_CATALOG_APPROVED": "2026-10-06-draft1"}), \
+                patch("app.services.item_assessment_service.suggestions", return_value=(legacy_rows, [])):
+            assessed, _ = self.run_assessment(request)
+            body = dict(inputs={**assessed["result"]["inputs"], "repairs": 65}, assessment_id=assessed["id"],
+                        assessment_confirmation=dict(
+                            repairs=[{key: row[key] for key in ("job_id", "materials_cost")} for row in legacy_rows],
+                            resale_source="assessment", preset_acknowledged=True))
+            response = self.client.post('/api/items/save', json=body)
+            self.assertEqual(response.status_code, 201, response.text)
+            original = response.json()
+        self.assertEqual(assessed["result"]["repair_catalog_version"], "2026-10-06-draft1")
+        with patch("app.services.item_assessment_service.call_provider") as call:
+            self.assertEqual(self.client.get('/api/items/assessments/' + assessed["id"]).json(), assessed)
+            self.assertEqual(self.client.post('/api/items/assess', json=request).json(), assessed)
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}').json(), original)
+            body.update(parent_item_id=original["id"], notes="Notes after catalog upgrade")
+            response = self.client.post('/api/items/save', json=body)
+            self.assertEqual(response.status_code, 201, response.text)
+            child = response.json()
+            self.assertEqual(child["root_item_id"], original["id"])
+            self.assertEqual(child["inputs"]["repairs"], 65)
+            self.assertEqual(child["analysis_result"], original["analysis_result"])
+            self.assertEqual(child["assessment"], original["assessment"])
+            self.assertEqual(child["assessment"]["evidence"]["repair_suggestions"], legacy_rows)
+            self.assertEqual(child["assessment"]["evidence"]["repair_unknowns"], [])
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}').json(), original)
+            self.assertEqual(self.client.get(f'/api/items/{child["id"]}').json(), child)
+            call.assert_not_called()
 
     def test_save_reopen_evidence_and_recalculate_without_another_paid_call(self):
         assessed, _ = self.run_assessment()
