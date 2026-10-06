@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 from unittest.mock import patch
 from uuid import uuid4
@@ -26,7 +26,7 @@ class BudgetTests(unittest.TestCase):
         self.url = "sqlite:///" + os.path.join(self.tmp.name, "budget.db")
         self.engine = create_engine(self.url, connect_args={"timeout": 15})
         Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False)
 
     def tearDown(self):
         self.engine.dispose()
@@ -122,28 +122,151 @@ class BudgetTests(unittest.TestCase):
                 self.assertEqual(budget.budget_status(db).spent, 0)
             self.reserve()
 
-    def test_uncertain_never_expires_and_known_usage_can_be_reconciled_once(self):
-        key, _ = self.reserve()
-        with self.Session() as db:
-            budget.uncertain(db, key)
-        with patch.object(budget, "utc_now", return_value=datetime(2030, 1, 1, tzinfo=timezone.utc)):
+    def test_uncertain_recovers_at_ten_minutes_and_duplicate_never_spends_again(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            key, _ = self.reserve()
+            with self.Session() as db:
+                budget.uncertain(db, key)
+        with patch.object(budget, "utc_now", return_value=start + timedelta(seconds=599)):
             with self.Session() as db:
                 self.assertEqual(budget.budget_status(db).reason, "assessment_busy")
-                budget.settle(db, key, 700_000, {}, failure_code="reconciled")
-                budget.settle(db, key, 900_000, {})
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            with self.Session() as db:
+                status = budget.budget_status(db)
+                self.assertEqual((status.spent, status.reserved, status.available), (.5, 0, True))
                 row = db.get(ItemAssessment, key)
-                self.assertEqual(row.actual_micros, 700_000)
-                self.assertEqual(db.get(ItemAIMonth, row.month).held_micros, 0)
+                self.assertEqual(row.status, "failed")
+                self.assertIsNone(row.actual_micros)
+                self.assertEqual(row.usage, {"cost_basis": "reservation_allowance", "accounted_micros": 500_000})
                 self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+                budget.uncertain(db, key)  # A late exception cannot undo recovery.
+                self.assertEqual(db.get(ItemAssessment, key).status, "failed")
+            self.assertEqual(self.reserve(key), (key, False))
+            self.assertTrue(self.reserve()[1])
+
+    def test_abandoned_processing_recovers_after_restart_and_charges_original_month(self):
+        start = datetime(2026, 12, 31, 23, 59, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            key, _ = self.reserve()
+        engine = create_engine(self.url)
+        try:
+            with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+                with sessionmaker(bind=engine)() as db:
+                    status = budget.budget_status(db)
+                    self.assertTrue(status.available)
+                    self.assertEqual((status.month, status.spent, status.reserved), ("2027-01", 0, 0))
+                    december = db.get(ItemAIMonth, "2026-12")
+                    self.assertEqual((december.spent_micros, december.held_micros), (500_000, 0))
+                    self.assertEqual(db.get(ItemAssessment, key).failure_code, "cost_assumed_after_grace")
+        finally:
+            engine.dispose()
+
+    def test_late_known_cost_replaces_allowance_once_without_releasing_new_run(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            key, _ = self.reserve()
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            next_key, _ = self.reserve()  # Recovery also happens without a budget poll.
+            with self.Session() as db:
+                budget.settle(db, key, 71000, {"input_tokens": 12000}, result={"schema_version": 1})
+                budget.settle(db, key, 900000, {})
+                row = db.get(ItemAIMonth, "2026-10")
+                self.assertEqual((row.spent_micros, row.held_micros), (71000, 500000))
+                self.assertEqual(db.get(ItemAIGate, 1).active_id, next_key)
+                self.assertEqual(db.get(ItemAssessment, key).actual_micros, 71000)
+                self.assertEqual(db.get(ItemAssessment, key).status, "completed")
+
+    def test_concurrent_expiry_and_above_hold_settlement_do_not_double_account(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            key, _ = self.reserve()
+        barrier = Barrier(8)
+        def worker(i):
+            with self.Session() as db:
+                barrier.wait()
+                if i % 2:
+                    budget.settle(db, key, 700000, {}, failure_code="reconciled")
+                else:
+                    budget.recover_expired(db)
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(worker, range(8)))
+        with self.Session() as db:
+            row = db.get(ItemAIMonth, "2026-10")
+            self.assertEqual((row.spent_micros, row.held_micros), (700000, 0))
+            self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_concurrent_recovery_charges_once_and_allows_only_one_new_run(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            self.reserve()
+        barrier = Barrier(8)
+        def worker(_):
+            barrier.wait()
+            try:
+                return self.reserve()[1]
+            except HTTPException as exc:
+                self.assertEqual(exc.status_code, 409)
+                return False
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(sum(pool.map(worker, range(8))), 1)
+        with self.Session() as db:
+            row = db.get(ItemAIMonth, "2026-10")
+            self.assertEqual((row.spent_micros, row.held_micros), (500000, 500000))
+            self.assertEqual(db.query(ItemAssessment).count(), 2)
+
+    def test_expiry_accounting_survives_rejected_next_reservation(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            with self.Session() as db:
+                db.add(ItemAIMonth(month="2026-10", spent_micros=19_500_000, held_micros=0))
+                db.commit()
+            key, _ = self.reserve()
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            with self.assertRaises(HTTPException) as exc:
+                self.reserve()
+            self.assertEqual(exc.exception.status_code, 429)
+            with self.Session() as db:
+                status = budget.budget_status(db)
+                self.assertEqual((status.spent, status.reserved, status.reason), (20, 0, "budget_paused"))
+                self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+                self.assertEqual(db.get(ItemAssessment, key).status, "failed")
 
     def test_failed_reservation_commit_makes_no_partial_hold(self):
         with self.Session() as db:
-            with patch.object(db, "commit", side_effect=RuntimeError("database unavailable")):
+            commit, calls = db.commit, 0
+            def fail_reservation_commit():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("database unavailable")
+                commit()  # Let the preceding recovery transaction complete.
+            with patch.object(db, "commit", side_effect=fail_reservation_commit):
                 with self.assertRaises(RuntimeError):
                     budget.reserve(db, "alice", str(uuid4()), "hash")
+            self.assertEqual(calls, 2)
         with self.Session() as db:
             self.assertEqual(db.query(ItemAssessment).count(), 0)
             self.assertEqual(budget.budget_status(db).reserved, 0)
+
+    def test_failed_recovery_commit_keeps_hold_until_successful_recovery(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        with patch.object(budget, "utc_now", return_value=start):
+            key, _ = self.reserve()
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            with self.Session() as db:
+                with patch.object(db, "commit", side_effect=RuntimeError("database unavailable")):
+                    with self.assertRaises(RuntimeError):
+                        budget.recover_expired(db)
+            with self.Session() as db:
+                row = db.get(ItemAIMonth, "2026-10")
+                self.assertEqual((row.spent_micros, row.held_micros), (0, 500000))
+                self.assertEqual(db.get(ItemAIGate, 1).active_id, key)
+                self.assertEqual(db.get(ItemAssessment, key).status, "processing")
+                self.assertTrue(budget.budget_status(db).available)
+                self.assertEqual(budget.budget_status(db).spent, .5)
 
     def test_upgrade_adds_only_companion_tables_and_postgres_ddl(self):
         engine = create_engine("sqlite://")

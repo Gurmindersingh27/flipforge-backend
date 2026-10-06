@@ -4,6 +4,7 @@ import json
 import os
 import unittest
 import httpx
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from app.db.models.saved_item import SavedItem
 from app.main import app
 from app.services.item_assessment_service import MODEL, usage_cost, call_provider
 from app.services.item_repair_catalog import VERSION
+from app.services import item_ai_budget_service as budget
 
 
 def request_body(**changes):
@@ -49,7 +51,7 @@ class AssessmentTests(unittest.TestCase):
         def foreign_keys(connection, _):
             connection.execute("PRAGMA foreign_keys=ON")
         Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False)
         def database():
             with self.Session() as db:
                 yield db
@@ -236,6 +238,56 @@ class AssessmentTests(unittest.TestCase):
         status = self.client.get('/api/items/ai-budget').json()
         self.assertEqual((status["reserved"], status["reason"]), (.5, "assessment_busy"))
         self.assertEqual(self.client.post('/api/items/analyze', json={}).status_code, 200)
+
+    def test_provider_http_errors_settle_zero_and_next_request_can_succeed(self):
+        for code in (400, 401, 402, 403, 404, 413, 429, 500, 504, 529):
+            with self.subTest(http_status=code):
+                body = request_body()
+                error = httpx.Response(code, json={"error": {"message": "private provider detail"}},
+                    request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+                # Exercise raise_for_status in the real HTTP adapter, no paid call.
+                with patch("app.services.item_assessment_service.httpx.Client") as client:
+                    post = client.return_value.__enter__.return_value.post
+                    post.return_value = error
+                    response = self.client.post('/api/items/assess', json=body)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    result = response.json()
+                    self.assertEqual((result["status"], result["actual_cost"]), ("failed", 0))
+                    self.assertEqual(result["failure_code"], "provider_error")
+                    self.assertIn("AI couldn't finish", result["message"])
+                    self.assertNotIn("private provider detail", response.text)
+                    self.assertEqual(self.client.post('/api/items/assess', json=body).json(), result)
+                    self.assertEqual(post.call_count, 1)  # Failed UUIDs are not retried.
+                status = self.client.get('/api/items/ai-budget').json()
+                self.assertEqual((status["spent"], status["reserved"], status["available"]), (0, 0, True))
+        result, call = self.run_assessment()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(call.call_count, 1)
+
+    def test_timeout_recovers_after_grace_without_paid_retry(self):
+        start = datetime(2026, 10, 6, tzinfo=timezone.utc)
+        body = request_body()
+        with patch.object(budget, "utc_now", return_value=start):
+            with patch("app.services.item_assessment_service.call_provider", side_effect=httpx.ReadTimeout("no answer")) as call:
+                first = self.client.post('/api/items/assess', json=body).json()
+                self.assertEqual(first["status"], "uncertain")
+                self.assertEqual(call.call_count, 1)
+        with patch("app.services.item_assessment_service.call_provider") as call:
+            with patch.object(budget, "utc_now", return_value=start + timedelta(seconds=599)):
+                self.assertEqual(self.client.get('/api/items/ai-budget').json()["reason"], "assessment_busy")
+            with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+                recovered = self.client.get('/api/items/assessments/' + first["id"]).json()
+                self.assertEqual(recovered["status"], "failed")
+                self.assertEqual(recovered["failure_code"], "cost_assumed_after_grace")
+                self.assertIsNone(recovered["actual_cost"])  # $0.50 is an allowance, not measured usage.
+                self.assertEqual(self.client.post('/api/items/assess', json=body).json(), recovered)
+                status = self.client.get('/api/items/ai-budget').json()
+                self.assertEqual((status["spent"], status["reserved"], status["available"]), (.5, 0, True))
+            call.assert_not_called()
+        with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
+            result, _ = self.run_assessment()
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .57)
 
     def test_bad_json_pause_and_token_stop_settle_usage_without_retry(self):
         for stop in ["pause_turn", "max_tokens", "end_turn"]:

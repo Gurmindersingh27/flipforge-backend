@@ -1,9 +1,10 @@
 """Reserve before spending. Never hold a SQL transaction during provider I/O.
 
 The $0.50 hold and $20 target are intentionally soft, not proven cost ceilings.
-An unresolved provider outcome keeps the global gate closed across restarts.
+An unresolved provider outcome holds the gate for ten minutes from reservation.
+After that, its full allowance counts against the budget until usage is known.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -18,6 +19,7 @@ from app.item_assessment_models import BudgetResponse
 TARGET = 20_000_000
 WARNING = 16_000_000
 HOLD = 500_000
+GRACE = timedelta(minutes=10)
 PAUSED = "AI estimates are paused until the 1st. Enter what you think it'll sell for."
 
 
@@ -34,8 +36,38 @@ def _ensure(db, model, values):
     db.execute(insert(model).values(**values).on_conflict_do_nothing())
 
 
+def recover_expired(db):
+    """Recover on the next budget check or assessment request, including restarts.
+
+    Use the same global lock as reservation/settlement. Commit recovery separately
+    so a refused new request cannot roll back the expired run's accounting.
+    """
+    try:
+        _ensure(db, ItemAIGate, dict(id=1))
+        db.execute(update(ItemAIGate).where(ItemAIGate.id == 1).values(id=1))
+        gate = db.get(ItemAIGate, 1, populate_existing=True)
+        if gate.active_id is not None:
+            record = db.get(ItemAssessment, gate.active_id, populate_existing=True)
+            # SQLite drops timezone information; stored timestamps are UTC.
+            started = record.created_at.replace(tzinfo=timezone.utc) if record.created_at.tzinfo is None else record.created_at
+            if record.status in ("processing", "uncertain") and utc_now() - started >= GRACE:
+                row = db.get(ItemAIMonth, record.month, populate_existing=True)
+                row.held_micros -= record.reserved_micros
+                row.spent_micros += record.reserved_micros
+                # This is budget accounting, not a confirmed provider charge.
+                # Keep actual_micros null; later known usage can replace it once.
+                record.usage = {"cost_basis": "reservation_allowance", "accounted_micros": record.reserved_micros}
+                record.status, record.failure_code = "failed", "cost_assumed_after_grace"
+                gate.active_id = None
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def reserve(db, user_id, request_id, fingerprint):
     """Returns (assessment, newly_reserved); duplicate keys never spend twice."""
+    recover_expired(db)
     month = month_key()
     try:
         _ensure(db, ItemAIGate, dict(id=1))
@@ -60,7 +92,7 @@ def reserve(db, user_id, request_id, fingerprint):
             raise HTTPException(429, {"code": "budget_paused", "message": PAUSED})
         gate.active_id = request_id
         record = ItemAssessment(id=request_id, user_id=user_id, request_hash=fingerprint,
-                                month=month, reserved_micros=HOLD, status="processing")
+                                month=month, reserved_micros=HOLD, status="processing", created_at=utc_now())
         db.add(record)
         db.commit()
         return record, True
@@ -80,7 +112,10 @@ def settle(db, request_id, actual_micros, usage, result=None, failure_code=None)
             db.commit()
             return record
         budget = db.get(ItemAIMonth, record.month, populate_existing=True)
-        budget.held_micros -= record.reserved_micros
+        if (record.usage or {}).get("cost_basis") == "reservation_allowance":
+            budget.spent_micros -= record.reserved_micros
+        else:
+            budget.held_micros -= record.reserved_micros
         budget.spent_micros += actual_micros
         record.actual_micros, record.usage = actual_micros, usage
         record.result, record.failure_code = result, failure_code
@@ -96,10 +131,11 @@ def settle(db, request_id, actual_micros, usage, result=None, failure_code=None)
 
 
 def uncertain(db, request_id):
-    # Do NOT expire or release the gate on timeout; the upstream may still run.
+    # The upstream may still run. Retain the hold until the grace period ends.
     try:
         db.execute(update(ItemAssessment).where(
             ItemAssessment.id == request_id, ItemAssessment.actual_micros.is_(None),
+            ItemAssessment.status.in_(("processing", "uncertain")),
         ).values(status="uncertain", failure_code="cost_unconfirmed"))
         db.commit()
     except Exception:
@@ -108,6 +144,7 @@ def uncertain(db, request_id):
 
 
 def budget_status(db, configured=True):
+    recover_expired(db)
     month = month_key()
     row = db.get(ItemAIMonth, month)
     gate = db.get(ItemAIGate, 1)

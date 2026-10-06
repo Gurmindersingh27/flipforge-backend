@@ -41,6 +41,9 @@ def owned_assessment(db, user_id, assessment_id):
     record = db.query(ItemAssessment).filter_by(id=assessment_id, user_id=user_id).first()
     if record is None:
         raise HTTPException(404, "Assessment not found.")
+    if record.status in ("processing", "uncertain"):
+        budget.recover_expired(db)
+        db.refresh(record)
     return record
 
 
@@ -153,6 +156,9 @@ def assess(db, user_id, body):
     if old is not None:
         if old.user_id != user_id or old.request_hash != fingerprint:
             raise HTTPException(409, "Request key already used. Start a new assessment.")
+        if old.status in ("processing", "uncertain"):
+            budget.recover_expired(db)
+            db.refresh(old)
         return assessment_response(old)
     if not configured():
         raise HTTPException(503, {"code": "ai_not_configured", "message":
@@ -165,6 +171,17 @@ def assess(db, user_id, body):
     try:
         raw = call_provider(payload)
         cost, usage = usage_cost(raw)
+    except httpx.HTTPStatusError as exc:
+        # Anthropic bills successful calls, not explicit HTTP failures. A client
+        # disconnect/timeout is different and may still have incurred a charge:
+        # https://support.claude.com/en/articles/8977456-how-do-i-pay-for-my-claude-api-usage
+        if 400 <= exc.response.status_code < 600:
+            record = budget.settle(db, request_id, 0,
+                {"cost_basis": "provider_error", "http_status": exc.response.status_code},
+                failure_code="provider_error")
+            return assessment_response(record)
+        budget.uncertain(db, request_id)
+        return assessment_response(db.get(ItemAssessment, request_id, populate_existing=True))
     except Exception:
         # Do not expose provider exception bodies, headers, image data, or keys.
         budget.uncertain(db, request_id)
