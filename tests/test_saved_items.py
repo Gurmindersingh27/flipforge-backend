@@ -21,6 +21,7 @@ from app.db.session import get_db
 from app.db.init_db import init_db
 from app.db.models.saved_deal import SavedDeal
 from app.db.models.saved_item import SavedItem
+from app.db.models.item_save_request import ItemSaveRequest
 
 
 def dresser(price=0):
@@ -128,6 +129,43 @@ class SavedItemsTests(unittest.TestCase):
         self.assertIn("JSONB", ddl)
         self.assertIn("root_item_id INTEGER NOT NULL", ddl)
         self.assertIn("DEFERRABLE INITIALLY DEFERRED", ddl)
+
+    def test_upgrade_adds_only_save_request_table_and_preserves_existing_rows(self):
+        engine = create_engine("sqlite://")
+        try:
+            Base.metadata.create_all(engine, tables=[t for t in Base.metadata.sorted_tables
+                                                   if t.name != "item_save_requests"])
+            old = {name: inspect(engine).get_columns(name) for name in inspect(engine).get_table_names()}
+            Session = sessionmaker(bind=engine)
+            with Session() as db:
+                from app.saved_item_models import SaveItemRequest
+                from app.services.saved_item_service import save_item, item_response
+                db.add(SavedDeal(user_id="alice", address="Existing house", analysis_result={"net_profit": 123}))
+                db.commit()
+                saved = save_item(db, "alice", SaveItemRequest.model_validate({"inputs": dresser(), "notes": "Keep me"}))
+                before = saved.model_dump(mode="json")
+            with patch("app.db.init_db.engine", engine):
+                init_db()
+                init_db()
+            self.assertEqual(set(inspect(engine).get_table_names()) - set(old), {"item_save_requests"})
+            for name, columns in old.items():
+                self.assertEqual([(c["name"], str(c["type"]), c["nullable"]) for c in columns],
+                                 [(c["name"], str(c["type"]), c["nullable"]) for c in inspect(engine).get_columns(name)])
+            with Session() as db:
+                self.assertEqual(db.query(SavedDeal).one().analysis_result, {"net_profit": 123})
+                self.assertEqual(item_response(db.get(SavedItem, saved.id)).model_dump(mode="json"), before)
+                self.assertEqual(db.query(ItemSaveRequest).count(), 0)
+                keyed = save_item(db, "alice", SaveItemRequest.model_validate({
+                    "request_id": "f7162852-4ac4-4e16-bfe3-bfb2d7fde290", "inputs": dresser(), "parent_item_id": saved.id,
+                }))
+                self.assertEqual(keyed.root_item_id, saved.id)
+        finally:
+            engine.dispose()
+        ddl = str(CreateTable(ItemSaveRequest.__table__).compile(dialect=postgresql.dialect()))
+        self.assertIn("CONSTRAINT pk_item_save_requests PRIMARY KEY (request_id)", ddl)
+        self.assertIn("FOREIGN KEY(item_id) REFERENCES saved_items (id)", ddl)
+        for column in ("user_id", "request_hash", "item_id"):
+            self.assertFalse(ItemSaveRequest.__table__.c[column].nullable)
 
     def test_save_get_and_numbers_are_canonical(self):
         body = dresser(100.01)
