@@ -27,6 +27,7 @@ def saved_inputs(inputs: ItemAnalyzeRequest) -> dict:
 
 
 class SaveItemRequest(ItemInputModel):
+    request_id: UUID | None = None
     inputs: ItemAnalyzeRequest
     listing_url: Annotated[StrictStr, Field(max_length=2048)] | None = None
     notes: Annotated[StrictStr, Field(max_length=5000)] | None = None
