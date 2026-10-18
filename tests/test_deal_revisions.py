@@ -10,6 +10,7 @@ from app.auth import get_current_user_id
 from app.db.base import Base
 from app.db.session import get_db
 from app.db.models.saved_deal import SavedDeal
+from app.db.models.deal_revision import DealRevision
 from app.models import RehabScope
 from app.services.deal_revision_service import scope_total
 
@@ -59,6 +60,64 @@ class RevisionTests(unittest.TestCase):
         response = self.client.post("/api/deals/save", json=body)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    def test_nul_in_saved_fields_is_rejected_without_writes(self):
+        original = self.save(payload())
+        cases = [
+            ("address", {"address": "Bad\x00address"}),
+            ("revision_note", {"revision_note": "Bad\x00note"}),
+            ("draft_input.notes[0]", {"draft_input": {"notes": ["Bad\x00note"]}}),
+            ("analysis_result.notes[0]", {"analysis_result": {"notes": ["Bad\x00note"]}}),
+            ("rehab_scope.notes", {"rehab_scope": {"notes": "Bad\x00note"}}),
+            ("rehab_scope.items[0].source", {"rehab_scope": {"items": [{
+                **payload()["rehab_scope"]["items"][0], "source": "Bad\x00source",
+            }]}}),
+            ("draft_input.nested['bad\\x00key'] (key)", {"draft_input": {"nested": {"bad\x00key": "value"}}}),
+            ("rehab_scope['bad\\x00key'] (key)", {"rehab_scope": {"bad\x00key": "value"}}),
+        ]
+        with self.Session() as db:
+            before = (db.query(SavedDeal).count(), db.query(DealRevision).count())
+        for path, changes in cases:
+            with self.subTest(path=path):
+                body = payload()
+                body.update(changes)
+                response = self.client.post("/api/deals/save", json=body)
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn(path, response.json()["detail"][0]["msg"])
+                with self.Session() as db:
+                    self.assertEqual((db.query(SavedDeal).count(), db.query(DealRevision).count()), before)
+                self.assertEqual(self.client.get(f'/api/deals/{original["id"]}').json(), original)
+
+    def test_unicode_saved_text_round_trips(self):
+        body = payload()
+        text = "Café • ਪੰਜਾਬੀ 🏠\nSecond line"
+        body.update(address=text, revision_note=text)
+        body["draft_input"]["notes"] = [text]
+        body["rehab_scope"]["notes"] = text
+        body["rehab_scope"]["items"][0]["source"] = text
+        saved = self.save(body)
+        self.assertEqual(saved["address"], text)
+        self.assertEqual(saved["revision_note"], text)
+        self.assertEqual(saved["draft_input"]["notes"], [text])
+        self.assertEqual(saved["rehab_scope"]["items"][0]["source"], text)
+        self.assertEqual(saved["rehab_scope"]["notes"], text)
+        self.assertEqual(self.client.get(f'/api/deals/{saved["id"]}').json(), saved)
+        legacy = self.save({"analysis_result": {text: [text]}})
+        self.assertEqual(legacy["analysis_result"], {text: [text]})
+
+    def test_nul_rule_does_not_change_public_analyze_or_scope_models(self):
+        scope = payload()["rehab_scope"]
+        scope["notes"] = "Before\x00after"
+        scope["items"][0]["source"] = "Before\x00after"
+        parsed = RehabScope.model_validate(scope)
+        self.assertEqual(parsed.notes, scope["notes"])
+        self.assertEqual(parsed.items[0].source, scope["items"][0]["source"])
+        body = {"purchase_price": 135000, "arv": 240000, "rehab_budget": 45000}
+        baseline = self.client.post("/api/analyze", json=body)
+        response = self.client.post("/api/analyze", json={**body, "rehab_scope": scope})
+        self.assertEqual(baseline.status_code, 200)
+        self.assertEqual(response.status_code, baseline.status_code)
+        self.assertEqual(response.json(), baseline.json())
 
     def test_full_save_reopen_quote_revise(self):
         original = self.save(payload())
