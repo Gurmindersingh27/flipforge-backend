@@ -224,6 +224,32 @@ class SaveDealRequest(BaseModel):
     parent_deal_id: Optional[int] = Field(default=None, gt=0)
     revision_note: str = Field(default="", max_length=2000)
 
+    @model_validator(mode="before")
+    @classmethod
+    def saved_text_without_nul(cls, data):
+        # Save-only: PostgreSQL rejects NUL in both text and JSONB, including
+        # JSON object keys. Inspect raw input so nested keys cannot be dropped
+        # by the typed scope model before this check.
+        def check(value, path):
+            if isinstance(value, BaseModel):
+                value = value.model_dump()
+            if isinstance(value, str):
+                if "\x00" in value:
+                    raise ValueError(f"{path} must not contain NUL characters")
+            elif isinstance(value, dict):
+                for key, child in value.items():
+                    check(key, f"{path}[{key!r}] (key)")
+                    child_path = f"{path}.{key}" if isinstance(key, str) and key.isidentifier() else f"{path}[{key!r}]"
+                    check(child, child_path)
+            elif isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    check(child, f"{path}[{index}]")
+
+        if isinstance(data, dict):
+            for field in ("address", "revision_note", "draft_input", "analysis_result", "rehab_scope"):
+                check(data.get(field), field)
+        return data
+
 
 class SavedDealResponse(BaseModel):
     id: int
