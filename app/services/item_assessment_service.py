@@ -121,32 +121,115 @@ def usage_cost(response):
         input_micros_per_token=3, output_micros_per_token=15, search_micros=10000)
 
 
+class UnusableAnswer(ValueError):
+    def __init__(self, diagnostics):
+        super().__init__("unusable provider answer")
+        self.diagnostics = diagnostics
+
+
+def diagnostic_fields(error):
+    """Accept only paths through the provider schema, never arbitrary extra keys."""
+    schema = ProviderAssessment.model_json_schema()
+    paths = []
+    for error in error.errors(include_input=False, include_context=False, include_url=False):
+        node, path = schema, ""
+        for part in error["loc"]:
+            if "$ref" in node:
+                node = schema["$defs"][node["$ref"].rsplit("/", 1)[-1]]
+            if isinstance(part, str) and part in node.get("properties", {}):
+                node = node["properties"][part]
+                path += ("." if path else "") + part
+            elif type(part) is int and node.get("type") == "array" and 0 <= part < node.get("maxItems", 0):
+                node = node["items"]
+                path += f"[{part}]"
+            else:
+                break
+        else:
+            if path and path not in paths:
+                paths.append(path)
+                if len(paths) == 10:
+                    break
+    return paths
+
+
+def failure_diagnostics(raw, stage, error):
+    # All persisted strings are fixed values or schema-owned names. Never store
+    # exception messages, provider text, unknown field names, or input values.
+    stop = raw.get("stop_reason")
+    allowed_stops = ("end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal")
+    counts = dict(text=0, server_tool_use=0, web_search_tool_result=0)
+    content = raw.get("content")
+    if isinstance(content, list):
+        for block in content:
+            kind = block.get("type") if isinstance(block, dict) else None
+            if isinstance(kind, str) and kind in counts:
+                counts[kind] += 1
+    fields = []
+    if stage == "schema" and isinstance(error, ValidationError):
+        errors = error.errors(include_input=False, include_context=False, include_url=False)
+        if any(entry["type"] == "json_invalid" for entry in errors):
+            stage = "json_parse"
+        else:
+            fields = diagnostic_fields(error)
+    return dict(stop_reason=stop if stop in allowed_stops else "unknown",
+                stage=stage, fields=fields, block_counts=counts)
+
+
 def build_result(body, raw):
-    if raw.get("stop_reason") != "end_turn":
-        raise ValueError("incomplete provider answer")
-    text = "".join(block.get("text", "") for block in raw.get("content", []) if block.get("type") == "text").strip()
-    if text.startswith("```json") and text.endswith("```"):
-        text = text[7:-3].strip()
-    report = ProviderAssessment.model_validate_json(text)
-    timestamp = budget.utc_now().isoformat()
-    listings, resale = select_evidence(report, raw, timestamp)
-    repairs, unknowns = suggestions(report)
-    asking = body.asking_price if "asking_price" in body.model_fields_set else report.asking_price
-    inputs = {**PRESET, "item_name": report.item_name, "category": report.category,
-              "purchase_price": None if asking is None else float(asking), "repairs": None,
-              "resale_low": resale["low"] if resale else None, "resale_high": resale["high"] if resale else None}
-    # Suggestions are not confirmed costs. The existing calculator deliberately
-    # returns needs_info until the user confirms or changes repairs.
-    validated = ItemAnalyzeRequest.model_validate(inputs)
-    return dict(schema_version=1, item_name=report.item_name, category=report.category,
-                asking_price=inputs["purchase_price"], asking_price_source=(
-                    "user_entered" if "asking_price" in body.model_fields_set else "description_extraction"),
-                listings=listings, resale=resale, repair_suggestions=repairs, repair_unknowns=unknowns,
-                repair_catalog_version=VERSION, assessed_at=timestamp,
-                questions=(["What do you think it'd sell for?"] if resale is None else []) +
-                          ["Do these repairs look right?" if not unknowns else "What do you expect the repairs to cost?"],
-                preset={"id": "local_cash_v1", "label": PRESET_LABEL, "values": PRESET},
-                inputs=saved_inputs(validated), analysis_result=analyze_item(validated).model_dump(mode="json"))
+    stage = "stop_reason"
+    try:
+        if raw.get("stop_reason") != "end_turn":
+            raise ValueError("incomplete provider answer")
+        stage = "extract_text"
+        blocks = raw.get("content", [])
+        if not isinstance(blocks, list) or any(not isinstance(block, dict) for block in blocks):
+            raise ValueError("invalid response blocks")
+        start = 0
+        for index, block in enumerate(blocks):
+            if block.get("type") == "web_search_tool_result":
+                start = index + 1
+        text = "".join(block.get("text", "") for block in blocks[start:]
+                       if block.get("type") == "text").strip()
+        if not text:
+            raise ValueError("missing final answer")
+        if text.startswith("```json") and text.endswith("```"):
+            text = text[7:-3].strip()
+        stage = "schema"
+        # Keep Pydantic's JSON validation semantics; json_invalid identifies the
+        # parse stage separately from schema failures without parsing twice.
+        report = ProviderAssessment.model_validate_json(text)
+        timestamp = budget.utc_now().isoformat()
+        stage = "evidence"
+        listings, resale = select_evidence(report, raw, timestamp)
+        stage = "repairs"
+        repairs, unknowns = suggestions(report)
+        stage = "calculator"
+        asking = body.asking_price if "asking_price" in body.model_fields_set else report.asking_price
+        inputs = {**PRESET, "item_name": report.item_name, "category": report.category,
+                  "purchase_price": None if asking is None else float(asking), "repairs": None,
+                  "resale_low": resale["low"] if resale else None, "resale_high": resale["high"] if resale else None}
+        # Suggestions are not confirmed costs. The existing calculator deliberately
+        # returns needs_info until the user confirms or changes repairs.
+        validated = ItemAnalyzeRequest.model_validate(inputs)
+        return dict(schema_version=1, item_name=report.item_name, category=report.category,
+                    asking_price=inputs["purchase_price"], asking_price_source=(
+                        "user_entered" if "asking_price" in body.model_fields_set else "description_extraction"),
+                    listings=listings, resale=resale, repair_suggestions=repairs, repair_unknowns=unknowns,
+                    repair_catalog_version=VERSION, assessed_at=timestamp,
+                    questions=(["What do you think it'd sell for?"] if resale is None else []) +
+                              ["Do these repairs look right?" if not unknowns else "What do you expect the repairs to cost?"],
+                    preset={"id": "local_cash_v1", "label": PRESET_LABEL, "values": PRESET},
+                    inputs=saved_inputs(validated), analysis_result=analyze_item(validated).model_dump(mode="json"))
+    except Exception as exc:
+        # Known usage must still settle if result processing or diagnostics fail.
+        # Do not catch BaseException (process interruption/termination).
+        try:
+            diagnostics = failure_diagnostics(raw, stage, exc)
+            if not isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+                diagnostics["unexpected"] = True
+        except Exception:
+            diagnostics = {"stage": stage, "diagnostics_error": True}
+        raise UnusableAnswer(diagnostics) from None
 
 
 def assess(db, user_id, body):
@@ -190,8 +273,9 @@ def assess(db, user_id, body):
         return assessment_response(db.get(ItemAssessment, request_id, populate_existing=True))
     try:
         result = build_result(body, raw)
-    except (ValueError, TypeError, KeyError, AttributeError, ValidationError):
+    except UnusableAnswer as exc:
         result = None
+        usage["diagnostics"] = exc.diagnostics
     record = budget.settle(db, request_id, cost, usage, result,
                            failure_code="unusable_answer" if result is None else None)
     return assessment_response(record)

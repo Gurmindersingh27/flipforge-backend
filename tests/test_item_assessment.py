@@ -5,6 +5,7 @@ import os
 import unittest
 import httpx
 from datetime import datetime, timedelta, timezone
+from decimal import InvalidOperation
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -42,6 +43,31 @@ def provider_response(prices=(65, 75, 90)):
                 server_tool_use=dict(web_search_requests=2)), content=[dict(type="text", text=json.dumps(report),
                 citations=[dict(type="web_search_result_location", url=row["url"],
                                 cited_text=f'Used wood chair ${row["price"]}, local pickup.') for row in listings])])
+
+
+def search_response():
+    """Synthetic wire shape, not a recording of the real furniture run."""
+    raw = provider_response()
+    final = raw["content"][0]
+    text, citations = final["text"], final["citations"]
+    cut = len(text) // 2
+    raw["content"] = [
+        dict(type="text", text="I'll search for comparable used chairs."),
+        dict(type="server_tool_use", id="search_1", name="web_search",
+             input={"query": "used wood chair local pickup"}),
+        dict(type="web_search_tool_result", tool_use_id="search_1", content=[
+            dict(type="web_search_result", url=citations[0]["url"], title="Used chair",
+                 encrypted_content="synthetic-search-content")]),
+        dict(type="text", text="Checking more listings.", citations=citations[:1]),
+        dict(type="server_tool_use", id="search_2", name="web_search",
+             input={"query": "wood dining chair pickup"}),
+        dict(type="web_search_tool_result", tool_use_id="search_2", content=[
+            dict(type="web_search_result", url=c["url"], title="Used chair",
+                 encrypted_content="synthetic-search-content") for c in citations[1:]]),
+        dict(type="text", text=text[:cut], citations=citations[1:2]),
+        dict(type="text", text=text[cut:], citations=citations[2:]),
+    ]
+    return raw
 
 
 class AssessmentTests(unittest.TestCase):
@@ -373,7 +399,224 @@ class AssessmentTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["actual_cost"], .071)
             self.assertEqual(call.call_count, 1)
+            with self.Session() as db:
+                diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+            self.assertEqual(diagnostics["stop_reason"], stop)
+            self.assertEqual(diagnostics["stage"], "json_parse" if stop == "end_turn" else "stop_reason")
         self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
+
+    def test_search_preamble_two_searches_and_split_json_keep_all_citations(self):
+        raw = search_response()
+        original = copy.deepcopy(raw)
+        result, call = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(call.call_count, 1)
+        evidence = result["result"]
+        self.assertEqual(evidence["resale"]["eligible_count"], 3)
+        self.assertEqual((evidence["resale"]["low"], evidence["resale"]["high"]), (70, 82.5))
+        # The first price's only citation precedes the LAST search result.
+        # The other two citations accompany separate final JSON text blocks.
+        self.assertTrue(all(row["eligible"] for row in evidence["listings"]))
+        self.assertEqual([row["supporting_quotes"] for row in evidence["listings"]],
+                         [[f"Used wood chair ${p}, local pickup."] for p in (65, 75, 90)])
+        self.assertEqual(raw, original)
+        with self.Session() as db:
+            self.assertNotIn("diagnostics", db.get(ItemAssessment, result["id"]).usage)
+
+    def test_no_search_plain_and_fenced_json_keep_existing_result(self):
+        now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        raw = provider_response(())
+        raw["usage"]["server_tool_use"]["web_search_requests"] = 0
+        with patch.object(budget, "utc_now", return_value=now):
+            plain, _ = self.run_assessment(raw=raw)
+            raw["content"][0]["text"] = "```json\n" + raw["content"][0]["text"] + "\n```"
+            fenced, _ = self.run_assessment(raw=raw)
+        self.assertEqual(plain["status"], "completed")
+        self.assertEqual(plain["result"], fenced["result"])
+        self.assertEqual(plain["actual_cost"], .051)
+        self.assertIsNone(plain["result"]["resale"])
+        with self.Session() as db:
+            self.assertNotIn("diagnostics", db.get(ItemAssessment, fenced["id"]).usage)
+
+    def test_failure_diagnostics_count_blocks_and_do_not_parse_earlier_json(self):
+        for suffix, stage in [([], "extract_text"),
+                              ([dict(type="text", text="private malformed answer")], "json_parse"),
+                              ([dict(type="text", text=None)], "extract_text")]:
+            with self.subTest(stage=stage, suffix=suffix):
+                raw = search_response()
+                raw["content"] = raw["content"][:6] + suffix
+                # Valid JSON BEFORE the last search must never become the answer.
+                raw["content"][0]["text"] = provider_response()["content"][0]["text"]
+                result, call = self.run_assessment(raw=raw)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(call.call_count, 1)
+                with self.Session() as db:
+                    diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+                self.assertEqual(diagnostics, dict(stop_reason="end_turn", stage=stage, fields=[],
+                    block_counts=dict(text=2 + len(suffix), server_tool_use=2, web_search_tool_result=2)))
+                self.assertNotIn("private", json.dumps(diagnostics))
+                self.assertNotIn("diagnostics", result)
+
+    def test_schema_diagnostics_allow_only_known_paths_and_at_most_ten(self):
+        raw = provider_response()
+        report = json.loads(raw["content"][0]["text"])
+        report["item_name"] = ""
+        report["repairs"][0]["reason"] = {"private-input": "secret-value"}
+        report["repairs"][0]["private-extra-key"] = "secret-value"
+        report["repair_unknowns"] = [False]
+        report["listings"][0]["price"] = "secret-value"
+        report["private-extra-key"] = "secret-value"
+        raw["content"][0]["text"] = json.dumps(report)
+        result, _ = self.run_assessment(raw=raw)
+        with self.Session() as db:
+            diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+        self.assertEqual(diagnostics["stage"], "schema")
+        self.assertEqual(diagnostics["fields"],
+                         ["item_name", "repairs[0].reason", "repair_unknowns[0]", "listings[0].price"])
+        self.assertNotIn("private", json.dumps(diagnostics))
+        self.assertNotIn("secret", json.dumps(diagnostics))
+        report = json.loads(provider_response()["content"][0]["text"])
+        report["listings"] = [{**report["listings"][0], "price": "secret-value"} for _ in range(12)]
+        raw["content"][0]["text"] = json.dumps(report)
+        result, _ = self.run_assessment(raw=raw)
+        with self.Session() as db:
+            diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+        self.assertEqual(diagnostics["fields"], [f"listings[{i}].price" for i in range(10)])
+
+    def test_unknown_stop_and_malformed_blocks_cannot_leak_provider_content(self):
+        for stop, content, stage in [
+                ("private-stop", [], "stop_reason"),
+                ({"private-stop": "secret"}, [], "stop_reason"),
+                ("end_turn", {"private-content": "secret"}, "extract_text"),
+                ("end_turn", [None, {"type": ["private-type"]}], "extract_text")]:
+            raw = provider_response()
+            raw.update(stop_reason=stop, content=content)
+            result, _ = self.run_assessment(raw=raw)
+            self.assertEqual(result["status"], "failed")
+            with self.Session() as db:
+                diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+            self.assertEqual(diagnostics["stage"], stage)
+            self.assertEqual(diagnostics["stop_reason"], "end_turn" if stop == "end_turn" else "unknown")
+            self.assertNotIn("private", json.dumps(diagnostics))
+            self.assertNotIn("secret", json.dumps(diagnostics))
+
+    def test_downstream_failures_record_stage_without_exception_details(self):
+        for target, stage in [("select_evidence", "evidence"), ("suggestions", "repairs"),
+                              ("analyze_item", "calculator")]:
+            with self.subTest(stage=stage), patch("app.services.item_assessment_service." + target,
+                    side_effect=ValueError("private provider text, image data or key")):
+                result, _ = self.run_assessment()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["actual_cost"], .071)
+            with self.Session() as db:
+                diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+            self.assertEqual(diagnostics["stage"], stage)
+            self.assertEqual(diagnostics["fields"], [])
+            self.assertNotIn("private", json.dumps(diagnostics))
+
+    def test_unexpected_processing_errors_settle_known_cost_and_release_hold(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        cases = [("select_evidence", "evidence", RuntimeError),
+                 ("suggestions", "repairs", IndexError),
+                 ("analyze_item", "calculator", InvalidOperation)]
+        for number, (target, stage, error) in enumerate(cases, 1):
+            with self.subTest(stage=stage), patch("app.services.item_assessment_service." + target,
+                    side_effect=error("private provider detail")):
+                result, call = self.run_assessment()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure_code"], "unusable_answer")
+            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(call.call_count, 1)
+            with self.Session() as db:
+                record = db.get(ItemAssessment, result["id"])
+                self.assertEqual(record.usage["diagnostics"], {
+                    "stop_reason": "end_turn", "stage": stage, "fields": [],
+                    "block_counts": {"text": 1, "server_tool_use": 0, "web_search_tool_result": 0},
+                    "unexpected": True})
+                month = db.get(ItemAIMonth, record.month)
+                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_broken_diagnostics_fall_back_and_still_settle_known_cost(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        for number, error in enumerate((ValueError, RuntimeError), 1):
+            with (self.subTest(error=error),
+                  patch("app.services.item_assessment_service.select_evidence",
+                        side_effect=error("private original failure")),
+                  patch("app.services.item_assessment_service.failure_diagnostics",
+                        side_effect=RuntimeError("private diagnostics failure"))):
+                result, call = self.run_assessment()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure_code"], "unusable_answer")
+            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(call.call_count, 1)
+            with self.Session() as db:
+                record = db.get(ItemAssessment, result["id"])
+                self.assertEqual(record.usage["diagnostics"], {"stage": "evidence", "diagnostics_error": True})
+                month = db.get(ItemAIMonth, record.month)
+                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_schema_array_without_max_items_omits_unbounded_path(self):
+        from app.item_assessment_models import ProviderAssessment
+        raw = provider_response()
+        report = json.loads(raw["content"][0]["text"])
+        report["item_name"] = ""
+        report["repairs"][0]["reason"] = False
+        raw["content"][0]["text"] = json.dumps(report)
+        schema = ProviderAssessment.model_json_schema()
+        del schema["properties"]["repairs"]["maxItems"]
+        with patch.object(ProviderAssessment, "model_json_schema", return_value=schema):
+            result, _ = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["actual_cost"], .071)
+        with self.Session() as db:
+            diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+        self.assertEqual(diagnostics["stage"], "schema")
+        self.assertEqual(diagnostics["fields"], ["item_name"])
+        self.assertNotIn("diagnostics_error", diagnostics)
+
+    def test_failure_diagnostics_settle_once_even_after_assumed_cost_recovery(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        start = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        raw = search_response()
+        raw["usage"].update(input_tokens=21369, output_tokens=1695)
+        raw["content"][-1]["text"] = "private invalid JSON"
+        for recover in (False, True):
+            with self.subTest(recover=recover):
+                body = request_body()
+                def provider(_):
+                    if recover:
+                        with patch.object(budget, "utc_now", return_value=start + budget.GRACE), self.Session() as db:
+                            budget.recover_expired(db)
+                            record = db.get(ItemAssessment, body["request_id"])
+                            self.assertIsNone(record.actual_micros)
+                            self.assertEqual(record.usage["cost_basis"], "reservation_allowance")
+                            self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 109532 + budget.HOLD)
+                    return raw
+                with (patch.object(budget, "utc_now", return_value=start),
+                      patch("app.services.item_assessment_service.call_provider", side_effect=provider) as call):
+                    result = self.client.post('/api/items/assess', json=body).json()
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(result["actual_cost"], .109532)
+                    self.assertEqual(result["failure_code"], "unusable_answer")
+                    self.assertEqual(self.client.post('/api/items/assess', json=body).json(), result)
+                    self.assertEqual(self.client.get('/api/items/assessments/' + result["id"]).json(), result)
+                    self.assertEqual(call.call_count, 1)
+                with self.Session() as db:
+                    record = db.get(ItemAssessment, result["id"])
+                    self.assertEqual(record.usage, {**usage_cost(raw)[1], "diagnostics": {
+                        "stop_reason": "end_turn", "stage": "json_parse", "fields": [],
+                        "block_counts": {"text": 4, "server_tool_use": 2, "web_search_tool_result": 2}}})
+                    # A second settlement cannot charge again or overwrite the diagnostics.
+                    budget.settle(db, result["id"], 999999, {})
+                    db.refresh(record)
+                    self.assertEqual(record.actual_micros, 109532)
+                    self.assertIn("diagnostics", record.usage)
+                    month = db.get(ItemAIMonth, record.month)
+                    self.assertEqual(month.spent_micros, 109532 * (2 if recover else 1))
+                    self.assertEqual(month.held_micros, 0)
+                    self.assertIsNone(db.get(ItemAIGate, 1).active_id)
 
     def test_unknown_usage_retains_reservation(self):
         raw = provider_response()
