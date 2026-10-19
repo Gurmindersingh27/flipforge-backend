@@ -139,7 +139,7 @@ def diagnostic_fields(error):
             if isinstance(part, str) and part in node.get("properties", {}):
                 node = node["properties"][part]
                 path += ("." if path else "") + part
-            elif type(part) is int and node.get("type") == "array" and 0 <= part < node["maxItems"]:
+            elif type(part) is int and node.get("type") == "array" and 0 <= part < node.get("maxItems", 0):
                 node = node["items"]
                 path += f"[{part}]"
             else:
@@ -220,8 +220,16 @@ def build_result(body, raw):
                               ["Do these repairs look right?" if not unknowns else "What do you expect the repairs to cost?"],
                     preset={"id": "local_cash_v1", "label": PRESET_LABEL, "values": PRESET},
                     inputs=saved_inputs(validated), analysis_result=analyze_item(validated).model_dump(mode="json"))
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        raise UnusableAnswer(failure_diagnostics(raw, stage, exc)) from None
+    except Exception as exc:
+        # Known usage must still settle if result processing or diagnostics fail.
+        # Do not catch BaseException (process interruption/termination).
+        try:
+            diagnostics = failure_diagnostics(raw, stage, exc)
+            if not isinstance(exc, (ValueError, TypeError, KeyError, AttributeError)):
+                diagnostics["unexpected"] = True
+        except Exception:
+            diagnostics = {"stage": stage, "diagnostics_error": True}
+        raise UnusableAnswer(diagnostics) from None
 
 
 def assess(db, user_id, body):

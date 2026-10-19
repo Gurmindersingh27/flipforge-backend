@@ -5,6 +5,7 @@ import os
 import unittest
 import httpx
 from datetime import datetime, timedelta, timezone
+from decimal import InvalidOperation
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -512,6 +513,68 @@ class AssessmentTests(unittest.TestCase):
             self.assertEqual(diagnostics["stage"], stage)
             self.assertEqual(diagnostics["fields"], [])
             self.assertNotIn("private", json.dumps(diagnostics))
+
+    def test_unexpected_processing_errors_settle_known_cost_and_release_hold(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        cases = [("select_evidence", "evidence", RuntimeError),
+                 ("suggestions", "repairs", IndexError),
+                 ("analyze_item", "calculator", InvalidOperation)]
+        for number, (target, stage, error) in enumerate(cases, 1):
+            with self.subTest(stage=stage), patch("app.services.item_assessment_service." + target,
+                    side_effect=error("private provider detail")):
+                result, call = self.run_assessment()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure_code"], "unusable_answer")
+            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(call.call_count, 1)
+            with self.Session() as db:
+                record = db.get(ItemAssessment, result["id"])
+                self.assertEqual(record.usage["diagnostics"], {
+                    "stop_reason": "end_turn", "stage": stage, "fields": [],
+                    "block_counts": {"text": 1, "server_tool_use": 0, "web_search_tool_result": 0},
+                    "unexpected": True})
+                month = db.get(ItemAIMonth, record.month)
+                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_broken_diagnostics_fall_back_and_still_settle_known_cost(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        for number, error in enumerate((ValueError, RuntimeError), 1):
+            with (self.subTest(error=error),
+                  patch("app.services.item_assessment_service.select_evidence",
+                        side_effect=error("private original failure")),
+                  patch("app.services.item_assessment_service.failure_diagnostics",
+                        side_effect=RuntimeError("private diagnostics failure"))):
+                result, call = self.run_assessment()
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failure_code"], "unusable_answer")
+            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(call.call_count, 1)
+            with self.Session() as db:
+                record = db.get(ItemAssessment, result["id"])
+                self.assertEqual(record.usage["diagnostics"], {"stage": "evidence", "diagnostics_error": True})
+                month = db.get(ItemAIMonth, record.month)
+                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_schema_array_without_max_items_omits_unbounded_path(self):
+        from app.item_assessment_models import ProviderAssessment
+        raw = provider_response()
+        report = json.loads(raw["content"][0]["text"])
+        report["item_name"] = ""
+        report["repairs"][0]["reason"] = False
+        raw["content"][0]["text"] = json.dumps(report)
+        schema = ProviderAssessment.model_json_schema()
+        del schema["properties"]["repairs"]["maxItems"]
+        with patch.object(ProviderAssessment, "model_json_schema", return_value=schema):
+            result, _ = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["actual_cost"], .071)
+        with self.Session() as db:
+            diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
+        self.assertEqual(diagnostics["stage"], "schema")
+        self.assertEqual(diagnostics["fields"], ["item_name"])
+        self.assertNotIn("diagnostics_error", diagnostics)
 
     def test_failure_diagnostics_settle_once_even_after_assumed_cost_recovery(self):
         from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
