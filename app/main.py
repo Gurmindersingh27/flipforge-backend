@@ -24,6 +24,8 @@ from .item_analysis_engine import analyze_item
 from .item_models import ItemAnalyzeRequest, ItemAnalyzeResponse
 from .saved_item_models import SaveItemRequest, SavedItemResponse, SavedItemListResponse
 from .services.saved_item_service import save_item, list_items, owned_item, item_response
+from .item_outcome_models import SaveItemOutcomeRequest, ItemOutcomeResponse
+from .services.item_outcome_service import save_outcome, latest_outcome
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
@@ -124,6 +126,25 @@ def get_items_ai_budget_endpoint(
 ):
     require_pilot(user_id)
     return budget_status(db, configured())
+
+
+@app.post("/api/items/{root_item_id}/outcomes", response_model=ItemOutcomeResponse, status_code=201)
+def save_item_outcome_endpoint(
+    body: SaveItemOutcomeRequest,
+    root_item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return save_outcome(db, user_id, root_item_id, body)
+
+
+@app.get("/api/items/{root_item_id}/outcomes", response_model=ItemOutcomeResponse | None)
+def get_item_outcome_endpoint(
+    root_item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return latest_outcome(db, user_id, root_item_id)
 
 
 @app.get("/api/items/{item_id}", response_model=SavedItemResponse)
