@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from decimal import Decimal
+from time import monotonic_ns
 
 import httpx
 from fastapi import HTTPException
@@ -242,7 +243,30 @@ def build_result(body, raw):
         raise UnusableAnswer(diagnostics) from None
 
 
+def timing_start():
+    try:
+        return monotonic_ns()
+    except Exception:
+        return None
+
+
+def record_timing(timings, field, start):
+    # Optional diagnostics must never change the paid request's outcome.
+    try:
+        end = monotonic_ns()
+        if field not in ("provider_ms", "processing_ms", "total_ms"):
+            return
+        if type(start) is not int or type(end) is not int:
+            return
+        elapsed = end - start
+        if 0 <= elapsed <= 600_000_000_000:
+            timings[field] = elapsed // 1_000_000
+    except Exception:
+        pass
+
+
 def assess(db, user_id, body):
+    started = timing_start()
     require_pilot(user_id)
     # A completed duplicate is recoverable even if paid calls are now disabled.
     fingerprint = hashlib.sha256(body.model_dump_json(exclude={"request_id"}).encode()).hexdigest()
@@ -263,16 +287,24 @@ def assess(db, user_id, body):
     record, fresh = budget.reserve(db, user_id, request_id, fingerprint)
     if not fresh:
         return assessment_response(record)
+    timings = {}
+    provider_started = timing_start()
     try:
-        raw = call_provider(payload)
+        try:
+            raw = call_provider(payload)
+        finally:
+            record_timing(timings, "provider_ms", provider_started)
         cost, usage = usage_cost(raw)
     except httpx.HTTPStatusError as exc:
         # Anthropic bills successful calls, not explicit HTTP failures. A client
         # disconnect/timeout is different and may still have incurred a charge:
         # https://support.claude.com/en/articles/8977456-how-do-i-pay-for-my-claude-api-usage
         if 400 <= exc.response.status_code < 600:
+            usage = {"cost_basis": "provider_error", "http_status": exc.response.status_code}
+            if timings:
+                usage["timings_ms"] = timings
             record = budget.settle(db, request_id, 0,
-                {"cost_basis": "provider_error", "http_status": exc.response.status_code},
+                usage,
                 failure_code="provider_error")
             return assessment_response(record)
         budget.uncertain(db, request_id)
@@ -281,11 +313,19 @@ def assess(db, user_id, body):
         # Do not expose provider exception bodies, headers, image data, or keys.
         budget.uncertain(db, request_id)
         return assessment_response(db.get(ItemAssessment, request_id, populate_existing=True))
+    processing_started = timing_start()
     try:
         result = build_result(body, raw)
     except UnusableAnswer as exc:
         result = None
         usage["diagnostics"] = exc.diagnostics
+    finally:
+        record_timing(timings, "processing_ms", processing_started)
+    # Ends at entry to settlement, excluding its lock/flush/commit. Persist in
+    # the existing transaction; never add a second write just for telemetry.
+    record_timing(timings, "total_ms", started)
+    if timings:
+        usage["timings_ms"] = timings
     record = budget.settle(db, request_id, cost, usage, result,
                            failure_code="unusable_answer" if result is None else None)
     return assessment_response(record)
