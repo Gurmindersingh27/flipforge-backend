@@ -21,7 +21,7 @@ from app.db.session import get_db
 from app.db.models.item_assessment import ItemAssessment, SavedItemAssessment
 from app.db.models.saved_item import SavedItem
 from app.main import app
-from app.services.item_assessment_service import MODEL, usage_cost, call_provider
+from app.services.item_assessment_service import MODEL, usage_cost, call_provider, record_timing
 from app.services.item_repair_catalog import VERSION
 from app.services import item_ai_budget_service as budget
 
@@ -102,6 +102,102 @@ class AssessmentTests(unittest.TestCase):
             response = self.client.post("/api/items/assess", json=body or request_body())
         self.assertEqual(response.status_code, 200, response.text)
         return response.json(), call
+
+    def test_timings_measure_success_and_failure_without_changing_settlement_or_replay(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        for fails in (False, True):
+            with self.subTest(fails=fails):
+                raw, body = provider_response(), request_body()
+                if fails:
+                    raw["content"][0]["text"] = "private invalid JSON"
+                # assess start, provider start/end, processing start/end, settlement entry.
+                clock = [0, 10_000_000, 110_000_000, 120_000_000, 145_000_000, 150_000_000]
+                with patch("app.services.item_assessment_service.monotonic_ns", side_effect=clock):
+                    result, call = self.run_assessment(body, raw)
+                self.assertEqual(result["status"], "failed" if fails else "completed")
+                self.assertEqual(result["actual_cost"], .054)
+                call.assert_called_once()
+                self.assertNotIn("timings_ms", result)  # No public contract change.
+                with self.Session() as db:
+                    record = db.get(ItemAssessment, result["id"])
+                    original_usage = copy.deepcopy(record.usage)
+                    self.assertEqual(record.usage["timings_ms"], {
+                        "provider_ms": 100, "processing_ms": 25, "total_ms": 150})
+                    self.assertTrue(all(type(v) is int for v in record.usage["timings_ms"].values()))
+                    self.assertNotIn("private", json.dumps(record.usage))
+                    month = db.get(ItemAIMonth, record.month)
+                    self.assertEqual(month.spent_micros, 54000 * (2 if fails else 1))
+                    self.assertEqual(month.held_micros, 0)
+                    self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+                with (patch("app.services.item_assessment_service.call_provider") as replay,
+                      patch("app.services.item_assessment_service.monotonic_ns", return_value=999_000_000)):
+                    self.assertEqual(self.client.post('/api/items/assess', json=body).json(), result)
+                    self.assertEqual(self.client.get('/api/items/assessments/' + result["id"]).json(), result)
+                    replay.assert_not_called()
+                with self.Session() as db:
+                    self.assertEqual(db.get(ItemAssessment, result["id"]).usage, original_usage)
+
+    def test_http_failure_records_only_provider_timing(self):
+        response = httpx.Response(429, request=httpx.Request("POST", "https://example.com"))
+        error = httpx.HTTPStatusError("private error", request=response.request, response=response)
+        with (patch("app.services.item_assessment_service.monotonic_ns",
+                    side_effect=[0, 10_000_000, 110_000_000]),
+              patch("app.services.item_assessment_service.call_provider", side_effect=error) as call):
+            result = self.client.post('/api/items/assess', json=request_body()).json()
+        self.assertEqual((result["status"], result["failure_code"], result["actual_cost"]),
+                         ("failed", "provider_error", 0))
+        call.assert_called_once()
+        with self.Session() as db:
+            self.assertEqual(db.get(ItemAssessment, result["id"]).usage, {
+                "cost_basis": "provider_error", "http_status": 429, "timings_ms": {"provider_ms": 100}})
+        self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
+
+    def test_timing_bounds_drop_invalid_values_instead_of_clamping(self):
+        for field in ("provider_ms", "processing_ms", "total_ms"):
+            for start, end, expected in (
+                (0, 0, 0), (0, 999_999, 0), (0, 1_999_999, 1),
+                (0, 600_000_000_000, 600000), (0, 600_000_000_001, None),
+                (1, 0, None), (None, 10, None), (True, 10, None),
+                (0, False, None), (0, float("nan"), None), (0, float("inf"), None),
+                (0, "private clock value", None), (0, RuntimeError("private clock error"), None),
+            ):
+                with self.subTest(field=field, start=start, end=end):
+                    timings = {}
+                    kwargs = {"side_effect": end} if isinstance(end, Exception) else {"return_value": end}
+                    with patch("app.services.item_assessment_service.monotonic_ns", **kwargs):
+                        record_timing(timings, field, start)
+                    self.assertEqual(timings, {} if expected is None else {field: expected})
+        with patch("app.services.item_assessment_service.monotonic_ns", return_value=1):
+            timings = {}
+            record_timing(timings, "private unknown field", 0)
+            self.assertEqual(timings, {})
+
+    def test_clock_errors_never_block_known_cost_settlement(self):
+        # Fail each individual clock read, then all of them. Remaining valid
+        # measurements survive; a failed measurement is absent, never zeroed.
+        values = [0, 10_000_000, 110_000_000, 120_000_000, 145_000_000, 150_000_000]
+        affected = ["total_ms", "provider_ms", "provider_ms", "processing_ms", "processing_ms", "total_ms"]
+        for index in range(7):
+            with self.subTest(clock_read=index):
+                clock = values.copy()
+                if index < 6:
+                    clock[index] = RuntimeError("private clock failure")
+                else:
+                    clock = [RuntimeError("private clock failure")] * 6
+                with patch("app.services.item_assessment_service.monotonic_ns", side_effect=clock):
+                    result, call = self.run_assessment()
+                self.assertEqual((result["status"], result["actual_cost"]), ("completed", .054))
+                call.assert_called_once()
+                with self.Session() as db:
+                    usage = db.get(ItemAssessment, result["id"]).usage
+                    expected = {"provider_ms": 100, "processing_ms": 25, "total_ms": 150}
+                    if index < 6:
+                        del expected[affected[index]]
+                        self.assertEqual(usage["timings_ms"], expected)
+                    else:
+                        self.assertNotIn("timings_ms", usage)
+                    self.assertNotIn("private", json.dumps(usage))
+                self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
 
     def test_assessment_has_cited_quartiles_explicit_preset_and_unconfirmed_repairs(self):
         result, call = self.run_assessment()
@@ -377,6 +473,8 @@ class AssessmentTests(unittest.TestCase):
                 first = self.client.post('/api/items/assess', json=body).json()
                 self.assertEqual(first["status"], "uncertain")
                 self.assertEqual(call.call_count, 1)
+                with self.Session() as db:
+                    self.assertNotIn("timings_ms", db.get(ItemAssessment, first["id"]).usage or {})
         with patch("app.services.item_assessment_service.call_provider") as call:
             with patch.object(budget, "utc_now", return_value=start + timedelta(seconds=599)):
                 self.assertEqual(self.client.get('/api/items/ai-budget').json()["reason"], "assessment_busy")
@@ -388,6 +486,8 @@ class AssessmentTests(unittest.TestCase):
                 self.assertEqual(self.client.post('/api/items/assess', json=body).json(), recovered)
                 status = self.client.get('/api/items/ai-budget').json()
                 self.assertEqual((status["spent"], status["reserved"], status["available"]), (.5, 0, True))
+                with self.Session() as db:
+                    self.assertNotIn("timings_ms", db.get(ItemAssessment, first["id"]).usage)
             call.assert_not_called()
         with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
             result, _ = self.run_assessment()
@@ -460,7 +560,8 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         with self.Session() as db:
             record = db.get(ItemAssessment, result["id"])
-            self.assertEqual(record.usage, dict(model="claude-sonnet-5-5", input_tokens=12000,
+            self.assertEqual({k: v for k, v in record.usage.items() if k != "timings_ms"},
+                dict(model="claude-sonnet-5-5", input_tokens=12000,
                 output_tokens=1000, web_search_requests=2, input_micros_per_token=2,
                 output_micros_per_token=10, search_micros=10000,
                 output_tokens_details={"thinking_tokens": 300}))
@@ -522,7 +623,11 @@ class AssessmentTests(unittest.TestCase):
                            return_value=(109532, copy.deepcopy(legacy_usage))):
                     old, _ = self.run_assessment(body, raw)
                 with self.Session() as db:
-                    original_usage = copy.deepcopy(db.get(ItemAssessment, old["id"]).usage)
+                    record = db.get(ItemAssessment, old["id"])
+                    # Historical records have no timings; replay must not backfill them.
+                    record.usage = {k: v for k, v in record.usage.items() if k != "timings_ms"}
+                    db.commit()
+                    original_usage = copy.deepcopy(record.usage)
                 with patch("app.services.item_assessment_service.call_provider") as call:
                     self.assertEqual(self.client.post('/api/items/assess', json=body).json(), old)
                     self.assertEqual(self.client.get('/api/items/assessments/' + old["id"]).json(), old)
@@ -698,6 +803,8 @@ class AssessmentTests(unittest.TestCase):
                             self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 79688 + budget.HOLD)
                     return raw
                 with (patch.object(budget, "utc_now", return_value=start),
+                      patch("app.services.item_assessment_service.monotonic_ns", side_effect=[
+                          0, 10_000_000, 110_000_000, 120_000_000, 145_000_000, 150_000_000, 999_000_000]),
                       patch("app.services.item_assessment_service.call_provider", side_effect=provider) as call):
                     result = self.client.post('/api/items/assess', json=body).json()
                     self.assertEqual(result["status"], "failed")
@@ -708,7 +815,8 @@ class AssessmentTests(unittest.TestCase):
                     self.assertEqual(call.call_count, 1)
                 with self.Session() as db:
                     record = db.get(ItemAssessment, result["id"])
-                    self.assertEqual(record.usage, {**usage_cost(raw)[1], "diagnostics": {
+                    self.assertEqual(record.usage, {**usage_cost(raw)[1],
+                        "timings_ms": {"provider_ms": 100, "processing_ms": 25, "total_ms": 150}, "diagnostics": {
                         "stop_reason": "end_turn", "stage": "json_parse", "fields": [],
                         "block_counts": {"text": 4, "server_tool_use": 2, "web_search_tool_result": 2,
                                          "thinking": 0, "redacted_thinking": 0}}})
@@ -717,6 +825,8 @@ class AssessmentTests(unittest.TestCase):
                     db.refresh(record)
                     self.assertEqual(record.actual_micros, 79688)
                     self.assertIn("diagnostics", record.usage)
+                    self.assertEqual(record.usage["timings_ms"], {
+                        "provider_ms": 100, "processing_ms": 25, "total_ms": 150})
                     month = db.get(ItemAIMonth, record.month)
                     self.assertEqual(month.spent_micros, 79688 * (2 if recover else 1))
                     self.assertEqual(month.held_micros, 0)
@@ -728,6 +838,8 @@ class AssessmentTests(unittest.TestCase):
         result, _ = self.run_assessment(raw=raw)
         self.assertEqual(result["status"], "uncertain")
         self.assertIsNone(result["actual_cost"])
+        with self.Session() as db:
+            self.assertNotIn("timings_ms", db.get(ItemAssessment, result["id"]).usage or {})
 
     def test_cost_accounts_for_real_over_hold_usage(self):
         raw = provider_response()
