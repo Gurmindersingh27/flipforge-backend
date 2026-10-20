@@ -106,7 +106,7 @@ class AssessmentTests(unittest.TestCase):
     def test_assessment_has_cited_quartiles_explicit_preset_and_unconfirmed_repairs(self):
         result, call = self.run_assessment()
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["actual_cost"], .071)
+        self.assertEqual(result["actual_cost"], .054)
         evidence = result["result"]
         self.assertEqual((evidence["resale"]["low"], evidence["resale"]["high"]), (70, 82.5))
         self.assertEqual(evidence["analysis_result"]["status"], "needs_info")
@@ -118,7 +118,11 @@ class AssessmentTests(unittest.TestCase):
         payload = call.call_args.args[0]
         self.assertEqual(payload["model"], MODEL)
         self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
-        self.assertEqual(payload["max_tokens"], 2500)
+        self.assertEqual(payload["max_tokens"], 4000)
+        self.assertEqual(payload["thinking"], {"type": "between_tools"})
+        self.assertEqual(payload["output_config"], {"effort": "medium"})
+        self.assertEqual(set(payload), {"model", "max_tokens", "system", "thinking",
+                                        "output_config", "tools", "messages"})
         self.assertEqual(call.call_count, 1)
 
     def test_duplicate_taps_reuse_result_and_changed_payload_conflicts(self):
@@ -184,9 +188,9 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("Return every applicable job; the server handles included work", prompt)
         self.assertIn("Put work outside these scopes", prompt)
         self.assertIn("Never calculate resale ranges, offers, profits, costs, or buy/pass decisions", prompt)
-        self.assertEqual(payload["max_tokens"], 2500)
+        self.assertEqual(payload["max_tokens"], 4000)
         self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
-        self.assertEqual(payload["model"], "claude-sonnet-4-5-20250929")
+        self.assertEqual(payload["model"], "claude-sonnet-5-5")
 
     def test_overlap_returns_unknown_empty_budget_and_saves_one_custom_total_with_evidence(self):
         raw = provider_response()
@@ -388,7 +392,7 @@ class AssessmentTests(unittest.TestCase):
         with patch.object(budget, "utc_now", return_value=start + budget.GRACE):
             result, _ = self.run_assessment()
             self.assertEqual(result["status"], "completed")
-            self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .57)
+            self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .55)
 
     def test_bad_json_pause_and_token_stop_settle_usage_without_retry(self):
         for stop in ["pause_turn", "max_tokens", "end_turn"]:
@@ -397,7 +401,7 @@ class AssessmentTests(unittest.TestCase):
             raw["content"][0]["text"] = "not json"
             result, call = self.run_assessment(raw=raw)
             self.assertEqual(result["status"], "failed")
-            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(result["actual_cost"], .054)
             self.assertEqual(call.call_count, 1)
             with self.Session() as db:
                 diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
@@ -433,10 +437,106 @@ class AssessmentTests(unittest.TestCase):
             fenced, _ = self.run_assessment(raw=raw)
         self.assertEqual(plain["status"], "completed")
         self.assertEqual(plain["result"], fenced["result"])
-        self.assertEqual(plain["actual_cost"], .051)
+        self.assertEqual(plain["actual_cost"], .034)
         self.assertIsNone(plain["result"]["resale"])
         with self.Session() as db:
             self.assertNotIn("diagnostics", db.get(ItemAssessment, fenced["id"]).usage)
+
+    def test_thinking_around_searches_and_split_answer_preserves_evidence(self):
+        raw = search_response()
+        # Synthetic 5.5 blocks: content/signatures must never enter persistence.
+        raw["content"].insert(0, dict(type="thinking", thinking="private before search",
+                                      signature="private signature"))
+        raw["content"].insert(5, dict(type="redacted_thinking", data="private redacted data"))
+        raw["content"].insert(-1, dict(type="thinking", thinking="private between final blocks",
+                                       signature="private signature"))
+        raw["usage"]["output_tokens_details"] = {"thinking_tokens": 300, "private": "secret"}
+        result, call = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["actual_cost"], .054)  # 24,000 + 10,000 + 20,000 microdollars
+        self.assertEqual(result["result"]["resale"]["eligible_count"], 3)
+        self.assertEqual((result["result"]["resale"]["low"], result["result"]["resale"]["high"]), (70, 82.5))
+        self.assertTrue(all(row["eligible"] for row in result["result"]["listings"]))
+        self.assertEqual(call.call_count, 1)
+        with self.Session() as db:
+            record = db.get(ItemAssessment, result["id"])
+            self.assertEqual(record.usage, dict(model="claude-sonnet-5-5", input_tokens=12000,
+                output_tokens=1000, web_search_requests=2, input_micros_per_token=2,
+                output_micros_per_token=10, search_micros=10000,
+                output_tokens_details={"thinking_tokens": 300}))
+            self.assertNotIn("private", json.dumps({"usage": record.usage, "result": record.result}))
+
+    def test_thinking_at_output_cap_settles_failure_without_retry(self):
+        from app.db.models.item_ai_budget import ItemAIMonth, ItemAIGate
+        raw = search_response()
+        raw["stop_reason"] = "max_tokens"
+        raw["usage"].update(output_tokens=4000, output_tokens_details={"thinking_tokens": 2305})
+        raw["content"].extend([dict(type="thinking", thinking="private reasoning", signature="private"),
+                               dict(type="redacted_thinking", data="private encrypted data")])
+        result, call = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["failure_code"], "unusable_answer")
+        self.assertEqual(result["actual_cost"], .084)
+        self.assertEqual(call.call_count, 1)
+        with self.Session() as db:
+            record = db.get(ItemAssessment, result["id"])
+            self.assertEqual(record.usage["output_tokens_details"], {"thinking_tokens": 2305})
+            self.assertEqual(record.usage["diagnostics"], dict(stop_reason="max_tokens", stage="stop_reason",
+                fields=[], block_counts=dict(text=4, server_tool_use=2, web_search_tool_result=2,
+                                             thinking=1, redacted_thinking=1)))
+            self.assertNotIn("private", json.dumps(record.usage))
+            month = db.get(ItemAIMonth, record.month)
+            self.assertEqual((month.spent_micros, month.held_micros), (84000, 0))
+            self.assertIsNone(db.get(ItemAIGate, 1).active_id)
+
+    def test_optional_thinking_usage_is_bounded_and_never_blocks_known_cost(self):
+        cases = [None, {}, "private details", {"thinking_tokens": True},
+                 {"thinking_tokens": -1}, {"thinking_tokens": 1001},
+                 {"thinking_tokens": "private count"}, {"thinking_tokens": 1.5},
+                 {"thinking_tokens": 0}, {"thinking_tokens": 1000}]
+        for details in cases:
+            with self.subTest(details=details):
+                raw = provider_response()
+                raw["usage"]["output_tokens_details"] = details
+                result, _ = self.run_assessment(raw=raw)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(result["actual_cost"], .054)
+                with self.Session() as db:
+                    usage = db.get(ItemAssessment, result["id"]).usage
+                if details in ({"thinking_tokens": 0}, {"thinking_tokens": 1000}):
+                    self.assertEqual(usage["output_tokens_details"], details)
+                else:
+                    self.assertNotIn("output_tokens_details", usage)
+        self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
+
+    def test_pre_migration_assessments_keep_original_model_rates_and_cost_on_replay(self):
+        from app.db.models.item_ai_budget import ItemAIMonth
+        legacy_usage = dict(model="claude-sonnet-4-5-20250929", input_tokens=21369,
+            output_tokens=1695, web_search_requests=2, input_micros_per_token=3,
+            output_micros_per_token=15, search_micros=10000)
+        for stop in ("end_turn", "max_tokens"):
+            with self.subTest(stop=stop):
+                body, raw = request_body(), provider_response()
+                raw["stop_reason"] = stop
+                with patch("app.services.item_assessment_service.usage_cost",
+                           return_value=(109532, copy.deepcopy(legacy_usage))):
+                    old, _ = self.run_assessment(body, raw)
+                with self.Session() as db:
+                    original_usage = copy.deepcopy(db.get(ItemAssessment, old["id"]).usage)
+                with patch("app.services.item_assessment_service.call_provider") as call:
+                    self.assertEqual(self.client.post('/api/items/assess', json=body).json(), old)
+                    self.assertEqual(self.client.get('/api/items/assessments/' + old["id"]).json(), old)
+                    call.assert_not_called()
+                self.assertEqual(old["actual_cost"], .109532)
+                with self.Session() as db:
+                    record = db.get(ItemAssessment, old["id"])
+                    self.assertEqual(record.usage, original_usage)
+                    self.assertEqual(record.actual_micros, 109532)
+        new, _ = self.run_assessment()
+        self.assertEqual(new["actual_cost"], .054)
+        with self.Session() as db:
+            record = db.get(ItemAssessment, new["id"])
+            self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 2 * 109532 + 54000)
 
     def test_failure_diagnostics_count_blocks_and_do_not_parse_earlier_json(self):
         for suffix, stage in [([], "extract_text"),
@@ -453,7 +553,8 @@ class AssessmentTests(unittest.TestCase):
                 with self.Session() as db:
                     diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
                 self.assertEqual(diagnostics, dict(stop_reason="end_turn", stage=stage, fields=[],
-                    block_counts=dict(text=2 + len(suffix), server_tool_use=2, web_search_tool_result=2)))
+                    block_counts=dict(text=2 + len(suffix), server_tool_use=2, web_search_tool_result=2,
+                                      thinking=0, redacted_thinking=0)))
                 self.assertNotIn("private", json.dumps(diagnostics))
                 self.assertNotIn("diagnostics", result)
 
@@ -507,7 +608,7 @@ class AssessmentTests(unittest.TestCase):
                     side_effect=ValueError("private provider text, image data or key")):
                 result, _ = self.run_assessment()
             self.assertEqual(result["status"], "failed")
-            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(result["actual_cost"], .054)
             with self.Session() as db:
                 diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
             self.assertEqual(diagnostics["stage"], stage)
@@ -525,16 +626,17 @@ class AssessmentTests(unittest.TestCase):
                 result, call = self.run_assessment()
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["failure_code"], "unusable_answer")
-            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(result["actual_cost"], .054)
             self.assertEqual(call.call_count, 1)
             with self.Session() as db:
                 record = db.get(ItemAssessment, result["id"])
                 self.assertEqual(record.usage["diagnostics"], {
                     "stop_reason": "end_turn", "stage": stage, "fields": [],
-                    "block_counts": {"text": 1, "server_tool_use": 0, "web_search_tool_result": 0},
+                    "block_counts": {"text": 1, "server_tool_use": 0, "web_search_tool_result": 0,
+                                     "thinking": 0, "redacted_thinking": 0},
                     "unexpected": True})
                 month = db.get(ItemAIMonth, record.month)
-                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertEqual((month.spent_micros, month.held_micros), (54000 * number, 0))
                 self.assertIsNone(db.get(ItemAIGate, 1).active_id)
 
     def test_broken_diagnostics_fall_back_and_still_settle_known_cost(self):
@@ -548,13 +650,13 @@ class AssessmentTests(unittest.TestCase):
                 result, call = self.run_assessment()
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["failure_code"], "unusable_answer")
-            self.assertEqual(result["actual_cost"], .071)
+            self.assertEqual(result["actual_cost"], .054)
             self.assertEqual(call.call_count, 1)
             with self.Session() as db:
                 record = db.get(ItemAssessment, result["id"])
                 self.assertEqual(record.usage["diagnostics"], {"stage": "evidence", "diagnostics_error": True})
                 month = db.get(ItemAIMonth, record.month)
-                self.assertEqual((month.spent_micros, month.held_micros), (71000 * number, 0))
+                self.assertEqual((month.spent_micros, month.held_micros), (54000 * number, 0))
                 self.assertIsNone(db.get(ItemAIGate, 1).active_id)
 
     def test_schema_array_without_max_items_omits_unbounded_path(self):
@@ -569,7 +671,7 @@ class AssessmentTests(unittest.TestCase):
         with patch.object(ProviderAssessment, "model_json_schema", return_value=schema):
             result, _ = self.run_assessment(raw=raw)
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["actual_cost"], .071)
+        self.assertEqual(result["actual_cost"], .054)
         with self.Session() as db:
             diagnostics = db.get(ItemAssessment, result["id"]).usage["diagnostics"]
         self.assertEqual(diagnostics["stage"], "schema")
@@ -581,6 +683,7 @@ class AssessmentTests(unittest.TestCase):
         start = datetime(2026, 10, 19, tzinfo=timezone.utc)
         raw = search_response()
         raw["usage"].update(input_tokens=21369, output_tokens=1695)
+        raw["usage"]["output_tokens_details"] = {"thinking_tokens": 250}
         raw["content"][-1]["text"] = "private invalid JSON"
         for recover in (False, True):
             with self.subTest(recover=recover):
@@ -592,13 +695,13 @@ class AssessmentTests(unittest.TestCase):
                             record = db.get(ItemAssessment, body["request_id"])
                             self.assertIsNone(record.actual_micros)
                             self.assertEqual(record.usage["cost_basis"], "reservation_allowance")
-                            self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 109532 + budget.HOLD)
+                            self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 79688 + budget.HOLD)
                     return raw
                 with (patch.object(budget, "utc_now", return_value=start),
                       patch("app.services.item_assessment_service.call_provider", side_effect=provider) as call):
                     result = self.client.post('/api/items/assess', json=body).json()
                     self.assertEqual(result["status"], "failed")
-                    self.assertEqual(result["actual_cost"], .109532)
+                    self.assertEqual(result["actual_cost"], .079688)
                     self.assertEqual(result["failure_code"], "unusable_answer")
                     self.assertEqual(self.client.post('/api/items/assess', json=body).json(), result)
                     self.assertEqual(self.client.get('/api/items/assessments/' + result["id"]).json(), result)
@@ -607,14 +710,15 @@ class AssessmentTests(unittest.TestCase):
                     record = db.get(ItemAssessment, result["id"])
                     self.assertEqual(record.usage, {**usage_cost(raw)[1], "diagnostics": {
                         "stop_reason": "end_turn", "stage": "json_parse", "fields": [],
-                        "block_counts": {"text": 4, "server_tool_use": 2, "web_search_tool_result": 2}}})
+                        "block_counts": {"text": 4, "server_tool_use": 2, "web_search_tool_result": 2,
+                                         "thinking": 0, "redacted_thinking": 0}}})
                     # A second settlement cannot charge again or overwrite the diagnostics.
                     budget.settle(db, result["id"], 999999, {})
                     db.refresh(record)
-                    self.assertEqual(record.actual_micros, 109532)
+                    self.assertEqual(record.actual_micros, 79688)
                     self.assertIn("diagnostics", record.usage)
                     month = db.get(ItemAIMonth, record.month)
-                    self.assertEqual(month.spent_micros, 109532 * (2 if recover else 1))
+                    self.assertEqual(month.spent_micros, 79688 * (2 if recover else 1))
                     self.assertEqual(month.held_micros, 0)
                     self.assertIsNone(db.get(ItemAIGate, 1).active_id)
 
@@ -627,10 +731,10 @@ class AssessmentTests(unittest.TestCase):
 
     def test_cost_accounts_for_real_over_hold_usage(self):
         raw = provider_response()
-        raw["usage"]["input_tokens"] = 200000
+        raw["usage"]["input_tokens"] = 300000
         result, _ = self.run_assessment(raw=raw)
-        self.assertEqual(result["actual_cost"], .635)
-        self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .64)
+        self.assertEqual(result["actual_cost"], .63)
+        self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .63)
 
     def test_usage_rejects_invalid_types_and_unexpected_cache_charges(self):
         for change in [{"input_tokens": True}, {"output_tokens": -1}, {"cache_creation_input_tokens": 10}]:

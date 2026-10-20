@@ -17,8 +17,9 @@ from app.services import item_ai_budget_service as budget
 from app.services.item_evidence_service import select_evidence
 from app.services.item_repair_catalog import CATALOG, VERSION, suggestions
 
-MODEL = "claude-sonnet-4-5-20250929"
-MAX_OUTPUT_TOKENS = 2500
+# Anthropic's 4.6+ dateless IDs identify pinned snapshots, not rolling aliases.
+MODEL = "claude-sonnet-5-5"
+MAX_OUTPUT_TOKENS = 4000
 PRESET = dict(pickup=0, delivery=0, storage=0, fee_fixed=0, fee_pct=0,
               hours=0, hourly_value=20, contingency_pct=0.15, target_profit=30)
 PRESET_LABEL = ("Assumes local pickup, no transport or storage costs, no selling fees, "
@@ -82,6 +83,7 @@ def provider_request(body):
                    "asking_price": None if body.asking_price is None else float(body.asking_price),
                    "location_hint": body.location}, ensure_ascii=True)})
     return dict(model=MODEL, max_tokens=MAX_OUTPUT_TOKENS, system=prompt,
+                thinking={"type": "between_tools"}, output_config={"effort": "medium"},
                 tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}],
                 messages=[{"role": "user", "content": content}])
 
@@ -116,9 +118,16 @@ def usage_cost(response):
     if "server_tool_use" not in usage or "web_search_requests" not in usage["server_tool_use"]:
         raise ValueError("missing search usage")
     searches = count("web_search_requests", usage["server_tool_use"])
-    return inputs * 3 + outputs * 15 + searches * 10_000, dict(
+    recorded = dict(
         model=MODEL, input_tokens=inputs, output_tokens=outputs, web_search_requests=searches,
-        input_micros_per_token=3, output_micros_per_token=15, search_micros=10000)
+        input_micros_per_token=2, output_micros_per_token=10, search_micros=10000)
+    # Thinking is already included in output_tokens; never bill it twice. This
+    # optional diagnostic must not prevent settlement of otherwise known usage.
+    details = usage.get("output_tokens_details")
+    thinking = details.get("thinking_tokens") if isinstance(details, dict) else None
+    if type(thinking) is int and 0 <= thinking <= outputs:
+        recorded["output_tokens_details"] = {"thinking_tokens": thinking}
+    return inputs * 2 + outputs * 10 + searches * 10_000, recorded
 
 
 class UnusableAnswer(ValueError):
@@ -157,7 +166,8 @@ def failure_diagnostics(raw, stage, error):
     # exception messages, provider text, unknown field names, or input values.
     stop = raw.get("stop_reason")
     allowed_stops = ("end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal")
-    counts = dict(text=0, server_tool_use=0, web_search_tool_result=0)
+    counts = dict(text=0, server_tool_use=0, web_search_tool_result=0,
+                  thinking=0, redacted_thinking=0)
     content = raw.get("content")
     if isinstance(content, list):
         for block in content:
