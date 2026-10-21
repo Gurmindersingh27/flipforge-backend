@@ -26,6 +26,8 @@ from .saved_item_models import SaveItemRequest, SavedItemResponse, SavedItemList
 from .services.saved_item_service import save_item, list_items, owned_item, item_response
 from .item_outcome_models import SaveItemOutcomeRequest, ItemOutcomeResponse
 from .services.item_outcome_service import save_outcome, latest_outcome
+from .item_preference_models import SaveItemPreferencesRequest, ItemPreferencesResponse
+from .services.item_preference_service import get_preferences, save_preferences
 from .services.url_service import draft_from_url
 from .services.pdf_service import generate_lender_report
 from .services.script_service import generate_negotiation_script
@@ -145,6 +147,23 @@ def get_item_outcome_endpoint(
     db: Session = Depends(get_db),
 ):
     return latest_outcome(db, user_id, root_item_id)
+
+
+@app.get("/api/items/preferences", response_model=ItemPreferencesResponse | None)
+def get_item_preferences_endpoint(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return get_preferences(db, user_id)
+
+
+@app.put("/api/items/preferences", response_model=ItemPreferencesResponse)
+def save_item_preferences_endpoint(
+    body: SaveItemPreferencesRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return save_preferences(db, user_id, body)
 
 
 @app.get("/api/items/{item_id}", response_model=SavedItemResponse)
