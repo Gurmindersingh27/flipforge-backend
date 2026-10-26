@@ -213,10 +213,6 @@ def build_result(body, raw):
             if marker_count != 1:
                 raise ValueError("duplicate assessment marker")
             prefix, text = text.split(ASSESSMENT_MARKER)
-            if prefix and not prefix.endswith("\n"):
-                raise ValueError("marker must start its own line")
-            if not text.startswith("\n"):
-                raise ValueError("marker must end its own line")
             # Do not accept another JSON object in the evidence prefix.
             if "{" in prefix or "}" in prefix:
                 raise ValueError("unexpected object before assessment")

@@ -521,12 +521,20 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(recovered.json(), result)
         self.assertEqual(replay.json(), result)
 
+    def test_marker_accepts_surrounding_whitespace_without_losing_evidence(self):
+        for prefix, suffix in [("Evidence. ", "\n"), ("", " "), ("Evidence.\t", "\r\n\t"), ("", "")]:
+            with self.subTest(prefix=prefix, suffix=suffix):
+                raw = provider_response()
+                raw["content"][0]["text"] = prefix + ASSESSMENT_MARKER + suffix + raw["content"][0]["text"]
+                result, call = self.run_assessment(raw=raw)
+                call.assert_called_once()
+                self.assertEqual((result["status"], result["actual_cost"]), ("completed", .054))
+                self.assertEqual(result["result"]["resale"]["eligible_count"], 3)
+
     def test_exact_marker_rejects_missing_duplicate_extra_json_and_trailing_text(self):
         payload = provider_response()["content"][0]["text"]
         for text in ["Evidence.\n" + payload,
                      "Evidence.\n" + ASSESSMENT_MARKER + "\n" + ASSESSMENT_MARKER + "\n" + payload,
-                     "Evidence. " + ASSESSMENT_MARKER + "\n" + payload,
-                     ASSESSMENT_MARKER + payload,
                      ASSESSMENT_MARKER + "\n" + payload + "\n{}",
                      ASSESSMENT_MARKER + "\n" + payload + " trailing prose",
                      "{}\n" + ASSESSMENT_MARKER + "\n" + payload]:

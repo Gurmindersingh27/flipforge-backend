@@ -7,6 +7,8 @@ from app.saved_item_models import SaveItemRequest
 from app.item_assessment_models import clean_text
 
 
+DOLLAR_PRICE_PATTERN = re.compile(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])")
+
 def canonical_url(value):
     # Reuse the save-only safety rule; do not fetch user or provider URLs.
     value = SaveItemRequest.safe_listing_url(value)
@@ -38,7 +40,7 @@ def quote_supports_price(quotes, price):
     # Require a dollar-denominated price in an actual provider citation, not
     # merely a model-generated URL or a number copied from its JSON answer.
     for quote in quotes:
-        for value in re.findall(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9.])", quote):
+        for value in DOLLAR_PRICE_PATTERN.findall(quote):
             if Decimal(value.replace(",", "")) == price:
                 return True
     return False
@@ -53,7 +55,7 @@ def evidence_diagnostics(response, listings):
     """
     sources = cited_sources(response)
     urls = {row["url"] for row in listings}
-    paths = {(urlsplit(url).hostname.lower(), urlsplit(url).path) for url in urls}
+    paths = {(urlsplit(url).hostname.lower(), urlsplit(url).path.rstrip("/")) for url in urls}
     quotes = [quote for values in sources.values() for quote in values]
     native = sum(1 for block in response.get("content", []) if block.get("type") == "text"
                  for citation in block.get("citations") or []
@@ -66,9 +68,8 @@ def evidence_diagnostics(response, listings):
             quote_supports_price(sources.get(row["url"], []), Decimal(str(row["price"])))
             for row in listings),
         near_miss_citation_count=sum(len(values) for url, values in sources.items()
-            if url not in urls and (urlsplit(url).hostname.lower(), urlsplit(url).path) in paths),
-        no_dollar_price_citation_count=sum(not re.search(
-            r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])", quote)
+            if url not in urls and (urlsplit(url).hostname.lower(), urlsplit(url).path.rstrip("/")) in paths),
+        no_dollar_price_citation_count=sum(not DOLLAR_PRICE_PATTERN.search(quote)
             for quote in quotes),
     )
 
