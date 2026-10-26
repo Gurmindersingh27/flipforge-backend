@@ -44,6 +44,35 @@ def quote_supports_price(quotes, price):
     return False
 
 
+def evidence_diagnostics(response, listings):
+    """Internal counts only; exact matching and eligibility remain unchanged.
+
+    Citation counts count occurrences, including repeated citations. Matched URL
+    count counts distinct retained listing URLs. Near misses count accepted
+    citations with a matching hostname/path but no exact retained listing URL.
+    """
+    sources = cited_sources(response)
+    urls = {row["url"] for row in listings}
+    paths = {(urlsplit(url).hostname.lower(), urlsplit(url).path) for url in urls}
+    quotes = [quote for values in sources.values() for quote in values]
+    native = sum(1 for block in response.get("content", []) if block.get("type") == "text"
+                 for citation in block.get("citations") or []
+                 if citation.get("type") == "web_search_result_location")
+    return dict(
+        native_citation_count=native,
+        accepted_citation_count=len(quotes),
+        matched_url_count=len(urls.intersection(sources)),
+        verified_price_listing_count=sum(
+            quote_supports_price(sources.get(row["url"], []), Decimal(str(row["price"])))
+            for row in listings),
+        near_miss_citation_count=sum(len(values) for url, values in sources.items()
+            if url not in urls and (urlsplit(url).hostname.lower(), urlsplit(url).path) in paths),
+        no_dollar_price_citation_count=sum(not re.search(
+            r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])", quote)
+            for quote in quotes),
+    )
+
+
 def quartile(values, fraction):
     ordered = sorted(values)
     position = (len(ordered) - 1) * fraction

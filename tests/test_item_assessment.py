@@ -21,7 +21,7 @@ from app.db.session import get_db
 from app.db.models.item_assessment import ItemAssessment, SavedItemAssessment
 from app.db.models.saved_item import SavedItem
 from app.main import app
-from app.services.item_assessment_service import MODEL, usage_cost, call_provider, record_timing
+from app.services.item_assessment_service import MODEL, ASSESSMENT_MARKER, usage_cost, call_provider, record_timing
 from app.services.item_repair_catalog import VERSION
 from app.services import item_ai_budget_service as budget
 
@@ -281,6 +281,8 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("routine cleaning", scopes["paint_chair"])
         self.assertIn("reuses sound foam and base", scopes["seat_fabric"])
         self.assertIn("excludes replacement wooden feet", scopes["replace_glides"])
+        self.assertIn("at most one short evidence sentence per listing (at most 12)", prompt)
+        self.assertEqual(prompt.count(ASSESSMENT_MARKER), 1)
         self.assertIn("Return every applicable job; the server handles included work", prompt)
         self.assertIn("Put work outside these scopes", prompt)
         self.assertIn("Never calculate resale ranges, offers, profits, costs, or buy/pass decisions", prompt)
@@ -494,6 +496,76 @@ class AssessmentTests(unittest.TestCase):
             self.assertEqual(result["status"], "completed")
             self.assertEqual(self.client.get('/api/items/ai-budget').json()["spent"], .55)
 
+    def test_cited_prose_split_marker_and_json_preserve_evidence_and_private_counts(self):
+        raw = search_response()
+        raw["content"].insert(-2, dict(type="text", text="Used chairs cost $65, $75 and $90.\n"))
+        raw["content"].insert(-2, dict(type="text", text=ASSESSMENT_MARKER[:10]))
+        raw["content"].insert(-2, dict(type="thinking", thinking="private thinking"))
+        raw["content"].insert(-2, dict(type="text", text=ASSESSMENT_MARKER[10:] + "\n"))
+        body = request_body()
+        result, call = self.run_assessment(body, raw)
+        call.assert_called_once()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["result"]["resale"]["eligible_count"], 3)
+        self.assertEqual(result["actual_cost"], .054)
+        with self.Session() as db:
+            counts = db.get(ItemAssessment, result["id"]).usage["evidence_diagnostics"]
+        self.assertEqual(counts, dict(native_citation_count=3, accepted_citation_count=3,
+            matched_url_count=3, verified_price_listing_count=3, near_miss_citation_count=0,
+            no_dollar_price_citation_count=0))
+        self.assertNotIn("evidence_diagnostics", json.dumps(result))
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            recovered = self.client.get('/api/items/assessments/' + result["id"])
+            replay = self.client.post('/api/items/assess', json=body)
+        provider.assert_not_called()
+        self.assertEqual(recovered.json(), result)
+        self.assertEqual(replay.json(), result)
+
+    def test_exact_marker_rejects_missing_duplicate_extra_json_and_trailing_text(self):
+        payload = provider_response()["content"][0]["text"]
+        for text in ["Evidence.\n" + payload,
+                     "Evidence.\n" + ASSESSMENT_MARKER + "\n" + ASSESSMENT_MARKER + "\n" + payload,
+                     "Evidence. " + ASSESSMENT_MARKER + "\n" + payload,
+                     ASSESSMENT_MARKER + payload,
+                     ASSESSMENT_MARKER + "\n" + payload + "\n{}",
+                     ASSESSMENT_MARKER + "\n" + payload + " trailing prose",
+                     "{}\n" + ASSESSMENT_MARKER + "\n" + payload]:
+            with self.subTest(text=text[:50]):
+                raw = provider_response()
+                raw["content"][0]["text"] = text
+                result, call = self.run_assessment(raw=raw)
+                call.assert_called_once()
+                self.assertEqual((result["status"], result["failure_code"], result["result"]),
+                                 ("failed", "unusable_answer", None))
+                self.assertEqual(result["actual_cost"], .054)
+                with self.Session() as db:
+                    self.assertEqual(db.get(ItemAssessment, result["id"]).usage["diagnostics"]["stage"], "json_parse")
+
+    def test_prose_plus_json_at_token_cap_settles_without_partial_evidence(self):
+        raw = provider_response()
+        raw["content"][0]["text"] = "Price $65.\n" + ASSESSMENT_MARKER + "\n" + raw["content"][0]["text"]
+        raw["stop_reason"] = "max_tokens"
+        raw["usage"]["output_tokens"] = 4000
+        result, call = self.run_assessment(raw=raw)
+        call.assert_called_once()
+        self.assertEqual((result["status"], result["failure_code"], result["result"], result["actual_cost"]),
+                         ("failed", "unusable_answer", None, .084))
+        with self.Session() as db:
+            usage = db.get(ItemAssessment, result["id"]).usage
+        self.assertEqual(usage["diagnostics"]["stage"], "stop_reason")
+        self.assertNotIn("evidence_diagnostics", usage)
+        self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
+
+    def test_broken_success_diagnostics_do_not_change_result_or_settlement(self):
+        with patch("app.services.item_assessment_service.evidence_diagnostics", side_effect=ValueError("private")):
+            result, call = self.run_assessment()
+        call.assert_called_once()
+        self.assertEqual((result["status"], result["actual_cost"]), ("completed", .054))
+        self.assertEqual(result["result"]["resale"]["eligible_count"], 3)
+        with self.Session() as db:
+            self.assertEqual(db.get(ItemAssessment, result["id"]).usage["evidence_diagnostics"],
+                             {"diagnostics_error": True})
+
     def test_bad_json_pause_and_token_stop_settle_usage_without_retry(self):
         for stop in ["pause_turn", "max_tokens", "end_turn"]:
             raw = provider_response()
@@ -564,7 +636,10 @@ class AssessmentTests(unittest.TestCase):
                 dict(model="claude-sonnet-5-5", input_tokens=12000,
                 output_tokens=1000, web_search_requests=2, input_micros_per_token=2,
                 output_micros_per_token=10, search_micros=10000,
-                output_tokens_details={"thinking_tokens": 300}))
+                output_tokens_details={"thinking_tokens": 300}, evidence_diagnostics=dict(
+                    native_citation_count=3, accepted_citation_count=3, matched_url_count=3,
+                    verified_price_listing_count=3, near_miss_citation_count=0,
+                    no_dollar_price_citation_count=0)))
             self.assertNotIn("private", json.dumps({"usage": record.usage, "result": record.result}))
 
     def test_thinking_at_output_cap_settles_failure_without_retry(self):

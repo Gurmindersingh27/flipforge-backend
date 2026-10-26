@@ -15,12 +15,13 @@ from app.item_models import ItemAnalyzeRequest
 from app.item_analysis_engine import analyze_item
 from app.saved_item_models import saved_inputs
 from app.services import item_ai_budget_service as budget
-from app.services.item_evidence_service import select_evidence
+from app.services.item_evidence_service import select_evidence, evidence_diagnostics
 from app.services.item_repair_catalog import CATALOG, VERSION, suggestions
 
 # Anthropic's 4.6+ dateless IDs identify pinned snapshots, not rolling aliases.
 MODEL = "claude-sonnet-5-5"
 MAX_OUTPUT_TOKENS = 4000
+ASSESSMENT_MARKER = "<<<FLIPFORGE_ASSESSMENT_JSON>>>"
 PRESET = dict(pickup=0, delivery=0, storage=0, fee_fixed=0, fee_pct=0,
               hours=0, hourly_value=20, contingency_pct=0.15, target_profit=30)
 PRESET_LABEL = ("Assumes local pickup, no transport or storage costs, no selling fees, "
@@ -67,7 +68,10 @@ def provider_request(body):
         "Prefer listings offering local pickup; national shipping and unknown location must be marked separately. "
         "Do not label something local_pickup unless the source explicitly offers pickup. "
         "Cite each price using web_search_result_location citations with the dollar price in cited_text. "
-        "Return only one JSON object matching this schema (no prose or code fences): "
+        "Before the JSON, give at most one short evidence sentence per listing (at most 12), "
+        "with native citations supporting the dollar prices. Use the exact cited URLs in listings. "
+        f"Then put {ASSESSMENT_MARKER} exactly once on its own line, followed by one JSON object. "
+        "The JSON must be last: no code fences, second object or trailing prose. Match this schema: "
         + json.dumps(ProviderAssessment.model_json_schema())
         + " Select repair job IDs from this catalog: " + json.dumps(catalog)
         + " Follow each job's scope and exclusions. Seat and top jobs cover this surface only, "
@@ -203,7 +207,21 @@ def build_result(body, raw):
                        if block.get("type") == "text").strip()
         if not text:
             raise ValueError("missing final answer")
-        if text.startswith("```json") and text.endswith("```"):
+        stage = "json_parse"
+        marker_count = text.count(ASSESSMENT_MARKER)
+        if marker_count:
+            if marker_count != 1:
+                raise ValueError("duplicate assessment marker")
+            prefix, text = text.split(ASSESSMENT_MARKER)
+            if prefix and not prefix.endswith("\n"):
+                raise ValueError("marker must start its own line")
+            if not text.startswith("\n"):
+                raise ValueError("marker must end its own line")
+            # Do not accept another JSON object in the evidence prefix.
+            if "{" in prefix or "}" in prefix:
+                raise ValueError("unexpected object before assessment")
+            text = text.strip()
+        if not marker_count and text.startswith("```json") and text.endswith("```"):
             text = text[7:-3].strip()
         stage = "schema"
         # Keep Pydantic's JSON validation semantics; json_invalid identifies the
@@ -316,6 +334,11 @@ def assess(db, user_id, body):
     processing_started = timing_start()
     try:
         result = build_result(body, raw)
+        try:
+            usage["evidence_diagnostics"] = evidence_diagnostics(raw, result["listings"])
+        except Exception:
+            # Optional counts must never change the answer or cost settlement.
+            usage["evidence_diagnostics"] = {"diagnostics_error": True}
     except UnusableAnswer as exc:
         result = None
         usage["diagnostics"] = exc.diagnostics
