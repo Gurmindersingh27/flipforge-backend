@@ -7,6 +7,8 @@ from app.saved_item_models import SaveItemRequest
 from app.item_assessment_models import clean_text
 
 
+DOLLAR_PRICE_PATTERN = re.compile(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])")
+
 def canonical_url(value):
     # Reuse the save-only safety rule; do not fetch user or provider URLs.
     value = SaveItemRequest.safe_listing_url(value)
@@ -38,10 +40,38 @@ def quote_supports_price(quotes, price):
     # Require a dollar-denominated price in an actual provider citation, not
     # merely a model-generated URL or a number copied from its JSON answer.
     for quote in quotes:
-        for value in re.findall(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9.])", quote):
+        for value in DOLLAR_PRICE_PATTERN.findall(quote):
             if Decimal(value.replace(",", "")) == price:
                 return True
     return False
+
+
+def evidence_diagnostics(response, listings):
+    """Internal counts only; exact matching and eligibility remain unchanged.
+
+    Citation counts count occurrences, including repeated citations. Matched URL
+    count counts distinct retained listing URLs. Near misses count accepted
+    citations with a matching hostname/path but no exact retained listing URL.
+    """
+    sources = cited_sources(response)
+    urls = {row["url"] for row in listings}
+    paths = {(urlsplit(url).hostname.lower(), urlsplit(url).path.rstrip("/")) for url in urls}
+    quotes = [quote for values in sources.values() for quote in values]
+    native = sum(1 for block in response.get("content", []) if block.get("type") == "text"
+                 for citation in block.get("citations") or []
+                 if citation.get("type") == "web_search_result_location")
+    return dict(
+        native_citation_count=native,
+        accepted_citation_count=len(quotes),
+        matched_url_count=len(urls.intersection(sources)),
+        verified_price_listing_count=sum(
+            quote_supports_price(sources.get(row["url"], []), Decimal(str(row["price"])))
+            for row in listings),
+        near_miss_citation_count=sum(len(values) for url, values in sources.items()
+            if url not in urls and (urlsplit(url).hostname.lower(), urlsplit(url).path.rstrip("/")) in paths),
+        no_dollar_price_citation_count=sum(not DOLLAR_PRICE_PATTERN.search(quote)
+            for quote in quotes),
+    )
 
 
 def quartile(values, fraction):

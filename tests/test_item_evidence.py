@@ -6,7 +6,7 @@ from fractions import Fraction
 from itertools import combinations, permutations
 
 from app.item_assessment_models import ProviderAssessment
-from app.services.item_evidence_service import quartile, select_evidence
+from app.services.item_evidence_service import quartile, select_evidence, evidence_diagnostics, quote_supports_price
 from app.services.item_repair_catalog import suggestions
 from test_item_assessment import provider_response
 
@@ -50,6 +50,61 @@ class EvidenceTests(unittest.TestCase):
         raw = provider_response()
         raw["content"][0]["citations"] = []
         self.assertIsNone(self.evidence(raw)[1])
+
+    def test_sentence_final_price_and_diagnostic_share_numeric_boundaries(self):
+        for quote, price, supported in [("Buy It Now for $259.00.", "259.00", True),
+                                        ("Asking $450.", "450", True),
+                                        ("$450, pickup", "450", True),
+                                        ("$12.345", "12.34", False)]:
+            with self.subTest(quote=quote):
+                self.assertEqual(quote_supports_price([quote], Decimal(price)), supported)
+                raw = provider_response((float(price),))
+                raw["content"][0]["citations"][0]["cited_text"] = quote
+                listings, _ = self.evidence(raw)
+                self.assertEqual(listings[0]["eligible"], supported)
+                counts = evidence_diagnostics(raw, listings)
+                self.assertEqual(counts["verified_price_listing_count"], int(supported))
+                self.assertEqual(counts["no_dollar_price_citation_count"], int(not supported))
+
+    def test_trailing_slash_near_misses_do_not_verify_price(self):
+        raw = provider_response()
+        for citation in raw["content"][0]["citations"]:
+            citation["url"] += "/?tracking=1"
+        listings, resale = self.evidence(raw)
+        counts = evidence_diagnostics(raw, listings)
+        self.assertEqual(counts["near_miss_citation_count"], 3)
+        self.assertEqual(counts["matched_url_count"], 0)
+        self.assertEqual(counts["verified_price_listing_count"], 0)
+        self.assertIsNone(resale)
+
+    def test_counts_distinguish_absent_near_miss_and_unpriced_citations(self):
+        for mode, expected in [
+            ("none", (0, 0, 0, 0, 0, 0)),
+            ("near", (3, 3, 0, 0, 3, 0)),
+            ("unpriced", (3, 3, 3, 0, 0, 3)),
+            ("wrong_price", (3, 3, 3, 0, 0, 0)),
+            ("valid", (3, 3, 3, 3, 0, 0)),
+            ("rejected", (3, 0, 0, 0, 0, 0)),
+        ]:
+            with self.subTest(mode=mode):
+                raw = provider_response()
+                if mode == "none":
+                    raw["content"][0]["citations"] = []
+                for citation in raw["content"][0]["citations"]:
+                    if mode == "near":
+                        citation["url"] += "?tracking=private"
+                    elif mode == "unpriced":
+                        citation["cited_text"] = "Used chair, pickup."
+                    elif mode == "wrong_price":
+                        citation["cited_text"] = "Price $999."
+                    elif mode == "rejected":
+                        citation["url"] = "javascript:private"
+                listings, resale = self.evidence(raw)
+                counts = evidence_diagnostics(raw, listings)
+                self.assertEqual(tuple(counts.values()), expected)
+                self.assertEqual(resale is not None, mode == "valid")
+                self.assertTrue(all(type(value) is int for value in counts.values()))
+                self.assertNotIn("private", json.dumps(counts))
 
     def test_unknown_repairs_stay_unknown_not_zero(self):
         raw = provider_response()
