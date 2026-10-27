@@ -7,6 +7,17 @@ from app.saved_item_models import SaveItemRequest
 from app.item_assessment_models import clean_text
 
 
+BLOCKED_RETAIL_DOMAINS = ("homedepot.com", "wayfair.com", "lowes.com", "ikea.com", "walmart.com", "amazon.com")
+
+
+def blocked_listing_url(value):
+    try:
+        host = urlsplit(canonical_url(value)).hostname.lower().rstrip(".")
+    except (ValueError, TypeError, AttributeError):
+        return False  # Existing URL validation handles malformed URLs.
+    return any(host == domain or host.endswith("." + domain) for domain in BLOCKED_RETAIL_DOMAINS)
+
+
 DOLLAR_PRICE_PATTERN = re.compile(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])")
 
 def canonical_url(value):
@@ -46,7 +57,7 @@ def quote_supports_price(quotes, price):
     return False
 
 
-def evidence_diagnostics(response, listings):
+def evidence_diagnostics(response, listings, blocked_listing_count=0):
     """Internal counts only; exact matching and eligibility remain unchanged.
 
     Citation counts count occurrences, including repeated citations. Matched URL
@@ -61,6 +72,7 @@ def evidence_diagnostics(response, listings):
                  for citation in block.get("citations") or []
                  if citation.get("type") == "web_search_result_location")
     return dict(
+        blocked_listing_count=blocked_listing_count,
         native_citation_count=native,
         accepted_citation_count=len(quotes),
         matched_url_count=len(urls.intersection(sources)),
@@ -87,6 +99,8 @@ def select_evidence(report, response, retrieved_at):
     citations = cited_sources(response)
     listings, prices, seen = [], [], set()
     for listing in report.listings:
+        if blocked_listing_url(listing.url):
+            continue
         try:
             url = canonical_url(listing.url)
         except (ValueError, TypeError):

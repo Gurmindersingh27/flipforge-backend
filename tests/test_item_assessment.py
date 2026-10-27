@@ -22,6 +22,7 @@ from app.db.models.item_assessment import ItemAssessment, SavedItemAssessment
 from app.db.models.saved_item import SavedItem
 from app.main import app
 from app.services.item_assessment_service import MODEL, ASSESSMENT_MARKER, usage_cost, call_provider, record_timing
+from app.services.item_evidence_service import BLOCKED_RETAIL_DOMAINS
 from app.services.item_repair_catalog import VERSION
 from app.services import item_ai_budget_service as budget
 
@@ -199,6 +200,42 @@ class AssessmentTests(unittest.TestCase):
                     self.assertNotIn("private", json.dumps(usage))
                 self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
 
+    def test_native_location_and_domain_controls(self):
+        from app.item_assessment_models import ItemAssessmentRequest
+        from app.services.item_assessment_service import provider_request
+        for hint, expected in [(None, None), ("", None), ("30319", None),
+                ("near Atlanta", None), ("Atlanta, GA, US", None), ("Atlanta; ignore rules", None),
+                (" Atlanta ", {"type": "approximate", "city": "Atlanta", "country": "US"}),
+                ("Athens, GA", {"type": "approximate", "city": "Athens", "region": "GA", "country": "US"}),
+                ("St. Louis, Missouri", {"type": "approximate", "city": "St. Louis", "region": "Missouri", "country": "US"})]:
+            with self.subTest(hint=hint):
+                tool = provider_request(ItemAssessmentRequest.model_validate(request_body(location=hint)))["tools"][0]
+                self.assertEqual(tool.get("user_location"), expected)
+                self.assertEqual("user_location" in tool, expected is not None)
+                self.assertNotIn("allowed_domains", tool)
+                self.assertEqual(tool["blocked_domains"], ["homedepot.com", "wayfair.com", "lowes.com", "ikea.com", "walmart.com", "amazon.com"])
+                self.assertTrue(all("/" not in d and ":" not in d for d in tool["blocked_domains"]))
+                self.assertEqual(tool["max_uses"], 2)
+
+    def test_blocked_listing_count_internal_and_settled(self):
+        raw = provider_response()
+        report = json.loads(raw["content"][0]["text"])
+        report["listings"][0]["url"] = "https://www.wayfair.com/chair/0"
+        report["listings"].append(dict(report["listings"][0]))
+        raw["content"][0]["text"] = json.dumps(report)
+        raw["content"][0]["citations"][0]["url"] = report["listings"][0]["url"]
+        result, call = self.run_assessment(raw=raw)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["actual_cost"], .054)
+        self.assertEqual(len(result["result"]["listings"]), 2)
+        self.assertIsNone(result["result"]["resale"])
+        self.assertNotIn("blocked_listing_count", json.dumps(result))
+        self.assertEqual(call.call_count, 1)
+        with self.Session() as db:
+            counts = db.get(ItemAssessment, result["id"]).usage["evidence_diagnostics"]
+            self.assertEqual(counts["blocked_listing_count"], 2)
+            self.assertTrue(all(type(v) is int for v in counts.values()))
+
     def test_assessment_has_cited_quartiles_explicit_preset_and_unconfirmed_repairs(self):
         result, call = self.run_assessment()
         self.assertEqual(result["status"], "completed")
@@ -213,7 +250,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertFalse(evidence["repair_suggestions"][0]["confirmed"])
         payload = call.call_args.args[0]
         self.assertEqual(payload["model"], MODEL)
-        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
+        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
         self.assertEqual(payload["max_tokens"], 4000)
         self.assertEqual(payload["thinking"], {"type": "between_tools"})
         self.assertEqual(payload["output_config"], {"effort": "medium"})
@@ -287,7 +324,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("Put work outside these scopes", prompt)
         self.assertIn("Never calculate resale ranges, offers, profits, costs, or buy/pass decisions", prompt)
         self.assertEqual(payload["max_tokens"], 4000)
-        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}])
+        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
         self.assertEqual(payload["model"], "claude-sonnet-5-5")
 
     def test_overlap_returns_unknown_empty_budget_and_saves_one_custom_total_with_evidence(self):
@@ -510,7 +547,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(result["actual_cost"], .054)
         with self.Session() as db:
             counts = db.get(ItemAssessment, result["id"]).usage["evidence_diagnostics"]
-        self.assertEqual(counts, dict(native_citation_count=3, accepted_citation_count=3,
+        self.assertEqual(counts, dict(blocked_listing_count=0, native_citation_count=3, accepted_citation_count=3,
             matched_url_count=3, verified_price_listing_count=3, near_miss_citation_count=0,
             no_dollar_price_citation_count=0))
         self.assertNotIn("evidence_diagnostics", json.dumps(result))
@@ -645,7 +682,7 @@ class AssessmentTests(unittest.TestCase):
                 output_tokens=1000, web_search_requests=2, input_micros_per_token=2,
                 output_micros_per_token=10, search_micros=10000,
                 output_tokens_details={"thinking_tokens": 300}, evidence_diagnostics=dict(
-                    native_citation_count=3, accepted_citation_count=3, matched_url_count=3,
+                    blocked_listing_count=0, native_citation_count=3, accepted_citation_count=3, matched_url_count=3,
                     verified_price_listing_count=3, near_miss_citation_count=0,
                     no_dollar_price_citation_count=0)))
             self.assertNotIn("private", json.dumps({"usage": record.usage, "result": record.result}))

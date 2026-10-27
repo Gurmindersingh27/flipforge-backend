@@ -26,6 +26,24 @@ class EvidenceTests(unittest.TestCase):
         report["listings"][0].update(updates)
         raw["content"][0]["text"] = json.dumps(report)
 
+    def test_retail_backstop_dot_boundaries_and_quartiles(self):
+        from app.services.item_evidence_service import BLOCKED_RETAIL_DOMAINS
+        for host, blocked in [(d, True) for d in BLOCKED_RETAIL_DOMAINS] + [
+                ("www.wayfair.com", True), ("WWW.WAYFAIR.COM.", True),
+                ("notwayfair.com", False), ("wayfair.com.example.org", False)]:
+            with self.subTest(host=host):
+                raw = provider_response()
+                url = f"https://{host}/chair/0?ref=wayfair.com"
+                self.change_listing(raw, url=url)
+                raw["content"][0]["citations"][0]["url"] = url
+                listings, resale = self.evidence(raw)
+                self.assertEqual(len(listings), 2 if blocked else 3)
+                if blocked:
+                    self.assertIsNone(resale)
+                    self.assertNotIn(url, [row["url"] for row in listings])
+                else:
+                    self.assertEqual((resale["low"], resale["high"]), (70, 82.5))
+
     def test_uncited_price_or_url_cannot_drive_range(self):
         for updates in [dict(price=999), dict(url="https://invented.example/item"), dict(url="javascript:alert(1)")]:
             raw = provider_response()
@@ -101,7 +119,7 @@ class EvidenceTests(unittest.TestCase):
                         citation["url"] = "javascript:private"
                 listings, resale = self.evidence(raw)
                 counts = evidence_diagnostics(raw, listings)
-                self.assertEqual(tuple(counts.values()), expected)
+                self.assertEqual(tuple(counts.values()), (0, *expected))
                 self.assertEqual(resale is not None, mode == "valid")
                 self.assertTrue(all(type(value) is int for value in counts.values()))
                 self.assertNotIn("private", json.dumps(counts))
