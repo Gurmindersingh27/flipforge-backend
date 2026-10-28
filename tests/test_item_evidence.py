@@ -119,7 +119,7 @@ class EvidenceTests(unittest.TestCase):
                         citation["url"] = "javascript:private"
                 listings, resale = self.evidence(raw)
                 counts = evidence_diagnostics(raw, listings)
-                self.assertEqual(tuple(counts.values()), (0, *expected))
+                self.assertEqual(tuple(counts.values()), (0, *expected, 0, 0))
                 self.assertEqual(resale is not None, mode == "valid")
                 self.assertTrue(all(type(value) is int for value in counts.values()))
                 self.assertNotIn("private", json.dumps(counts))

@@ -16,7 +16,10 @@ from app.item_models import ItemAnalyzeRequest
 from app.item_analysis_engine import analyze_item
 from app.saved_item_models import saved_inputs
 from app.services import item_ai_budget_service as budget
-from app.services.item_evidence_service import select_evidence, evidence_diagnostics, BLOCKED_RETAIL_DOMAINS, blocked_listing_url
+from app.services.item_evidence_service import (
+    select_evidence, national_reference, evidence_diagnostics,
+    BLOCKED_RETAIL_DOMAINS, MIN_RANGE_LISTINGS, blocked_listing_url,
+)
 from app.services.item_repair_catalog import CATALOG, VERSION, suggestions
 
 # Anthropic's 4.6+ dateless IDs identify pinned snapshots, not rolling aliases.
@@ -93,6 +96,11 @@ def provider_request(body):
         "Do not substitute new-retail prices when used listings cannot be found; return fewer or no listings. "
         "Prefer listings offering local pickup; national shipping and unknown location must be marked separately. "
         "Do not label something local_pickup unless the source explicitly offers pickup. "
+        "For each listing, extract condition_type as used, new, or unknown from the source; "
+        "do not infer used condition just because the site sells used goods. "
+        "Set price_basis to item_only only when the stated item price excludes shipping charges; "
+        "use shipping_included for bundled or free shipping and unknown when unclear. "
+        "Never subtract or estimate shipping to manufacture an item-only price. "
         "Cite each price using web_search_result_location citations with the dollar price in cited_text. "
         "Before the JSON, give at most one short evidence sentence per listing (at most 12), "
         "with native citations supporting the dollar prices. Use the exact cited URLs in listings. "
@@ -260,6 +268,7 @@ def build_result(body, raw, evidence_counts=None):
         timestamp = budget.utc_now().isoformat()
         stage = "evidence"
         listings, resale = select_evidence(report, raw, timestamp)
+        national_resale = national_reference(listings, resale)
         stage = "repairs"
         repairs, unknowns = suggestions(report)
         stage = "calculator"
@@ -273,7 +282,8 @@ def build_result(body, raw, evidence_counts=None):
         return dict(schema_version=1, item_name=report.item_name, category=report.category,
                     asking_price=inputs["purchase_price"], asking_price_source=(
                         "user_entered" if "asking_price" in body.model_fields_set else "description_extraction"),
-                    listings=listings, resale=resale, repair_suggestions=repairs, repair_unknowns=unknowns,
+                    listings=listings, resale=resale, national_resale=national_resale,
+                    repair_suggestions=repairs, repair_unknowns=unknowns,
                     repair_catalog_version=VERSION, assessed_at=timestamp,
                     questions=(["What do you think it'd sell for?"] if resale is None else []) +
                               ["Do these repairs look right?" if not unknowns else "What do you expect the repairs to cost?"],
@@ -402,6 +412,13 @@ def saved_context(db, user_id, body):
     if confirmation.resale_source == "assessment":
         resale = record.result["resale"]
         if resale is None or body.inputs.resale_low != Decimal(str(resale["low"])) or body.inputs.resale_high != Decimal(str(resale["high"])):
+            raise HTTPException(422, "Changed resale values must be labeled your estimate.")
+    elif confirmation.resale_source == "national_reference":
+        resale = record.result.get("national_resale")
+        if (record.result.get("resale") is not None or resale is None
+                or resale["eligible_count"] < MIN_RANGE_LISTINGS):
+            raise HTTPException(422, "This assessment has no qualifying national reference to use.")
+        if body.inputs.resale_low != Decimal(str(resale["low"])) or body.inputs.resale_high != Decimal(str(resale["high"])):
             raise HTTPException(422, "Changed resale values must be labeled your estimate.")
     return dict(assessment_id=record.id, evidence=record.result,
                 confirmation=dict(repairs=[dict(job_id=r.job_id, materials_cost=float(r.materials_cost))
