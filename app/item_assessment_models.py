@@ -74,6 +74,10 @@ class ListingCandidate(AssessmentInputModel):
     price: MoneyInput
     currency: Literal["USD"]
     condition: Annotated[Text, Field(max_length=200)]
+    # Extraction judgments, not verification of the item's physical condition.
+    # Legacy answers remain valid but cannot supply a national reference.
+    condition_type: Literal["used", "new", "unknown"] = "unknown"
+    price_basis: Literal["item_only", "shipping_included", "unknown"] = "unknown"
     comparable: StrictBool
     single_item: StrictBool
     market: Literal["local_pickup", "national_shipping", "unknown"]
@@ -102,7 +106,7 @@ class ConfirmedRepair(AssessmentInputModel):
 
 class AssessmentConfirmation(AssessmentInputModel):
     repairs: Annotated[list[ConfirmedRepair], Field(max_length=10)]
-    resale_source: Literal["assessment", "user_estimate"]
+    resale_source: Literal["assessment", "user_estimate", "national_reference"]
     preset_acknowledged: StrictBool
 
 
@@ -126,6 +130,8 @@ class ListingEvidence(ItemOutputModel):
     currency: Literal["USD"]
     source: str
     condition: str
+    condition_type: Literal["used", "new", "unknown"] = "unknown"
+    price_basis: Literal["item_only", "shipping_included", "unknown"] = "unknown"
     market: Literal["local_pickup", "national_shipping", "unknown"]
     location: str | None
     retrieved_at: str
@@ -133,6 +139,12 @@ class ListingEvidence(ItemOutputModel):
     eligible: bool
     exclusion_reason: str | None
     supporting_quotes: list[str]
+    national_eligible: bool = False
+    national_exclusion_reason: Literal[
+        "unsupported_price", "zero_price", "not_comparable", "not_shipped",
+        "condition_new", "condition_unknown", "shipping_included", "price_basis_unknown",
+        "not_recorded",
+    ] | None = "not_recorded"
 
 
 class ResaleEstimate(ItemOutputModel):
@@ -160,6 +172,7 @@ class AssessmentResult(ItemOutputModel):
     asking_price_source: Literal["user_entered", "description_extraction"]
     listings: list[ListingEvidence]
     resale: ResaleEstimate | None
+    national_resale: ResaleEstimate | None = None
     repair_suggestions: list[SuggestedRepair]
     repair_unknowns: list[str]
     repair_catalog_version: str

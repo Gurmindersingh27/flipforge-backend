@@ -8,6 +8,12 @@ from app.item_assessment_models import clean_text
 
 
 BLOCKED_RETAIL_DOMAINS = ("homedepot.com", "wayfair.com", "lowes.com", "ikea.com", "walmart.com", "amazon.com")
+MIN_RANGE_LISTINGS = 3
+# These reasons follow the shared price/comparability/shipping gates. They let
+# optional diagnostics count BOTH unknown flags without repeating eligibility.
+NATIONAL_CLASSIFICATION_REASONS = frozenset({
+    "condition_new", "condition_unknown", "shipping_included", "price_basis_unknown",
+})
 
 
 def blocked_listing_url(value):
@@ -63,6 +69,9 @@ def evidence_diagnostics(response, listings, blocked_listing_count=0):
     Citation counts count occurrences, including repeated citations. Matched URL
     count counts distinct retained listing URLs. Near misses count accepted
     citations with a matching hostname/path but no exact retained listing URL.
+    National unknown counts are independent, and may overlap: their denominator
+    is retained, supported, positive, comparable single shipped listings, before
+    checking condition_type and price_basis. Blocked/duplicate rows never count.
     """
     sources = cited_sources(response)
     urls = {row["url"] for row in listings}
@@ -71,6 +80,8 @@ def evidence_diagnostics(response, listings, blocked_listing_count=0):
     native = sum(1 for block in response.get("content", []) if block.get("type") == "text"
                  for citation in block.get("citations") or []
                  if citation.get("type") == "web_search_result_location")
+    national_candidates = [row for row in listings if row.get("national_eligible") is True
+                           or row.get("national_exclusion_reason") in NATIONAL_CLASSIFICATION_REASONS]
     return dict(
         blocked_listing_count=blocked_listing_count,
         native_citation_count=native,
@@ -83,6 +94,8 @@ def evidence_diagnostics(response, listings, blocked_listing_count=0):
             if url not in urls and (urlsplit(url).hostname.lower(), urlsplit(url).path.rstrip("/")) in paths),
         no_dollar_price_citation_count=sum(not DOLLAR_PRICE_PATTERN.search(quote)
             for quote in quotes),
+        national_unknown_condition_count=sum(row["condition_type"] == "unknown" for row in national_candidates),
+        national_unknown_price_basis_count=sum(row["price_basis"] == "unknown" for row in national_candidates),
     )
 
 
@@ -93,6 +106,41 @@ def quartile(values, fraction):
     upper = min(lower + 1, len(ordered) - 1)
     value = ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
     return value.quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+
+
+def price_range(prices, label):
+    if len(prices) < MIN_RANGE_LISTINGS:
+        return None
+    return dict(low=float(quartile(prices, Decimal(".25"))),
+                high=float(quartile(prices, Decimal(".75"))),
+                source="online_asking_prices", eligible_count=len(prices),
+                method="linear_quartiles_v1", label=label)
+
+
+def national_exclusion_reason(listing, supported):
+    # Independent of the local first-failure reason: local eligibility and its
+    # ordering are unchanged. Report the first failed national rule for the UI.
+    if not supported:
+        return "unsupported_price"
+    if listing.price <= 0:
+        return "zero_price"
+    if not listing.comparable or not listing.single_item:
+        return "not_comparable"
+    if listing.market != "national_shipping":
+        return "not_shipped"
+    if listing.condition_type != "used":
+        return "condition_new" if listing.condition_type == "new" else "condition_unknown"
+    if listing.price_basis != "item_only":
+        return "shipping_included" if listing.price_basis == "shipping_included" else "price_basis_unknown"
+    return None
+
+
+def national_reference(listings, local_resale):
+    # Separate pools, never silently applied. A qualifying local range wins.
+    if local_resale is not None:
+        return None
+    prices = [Decimal(str(row["price"])) for row in listings if row["national_eligible"]]
+    return price_range(prices, "National used asking prices; shipping excluded. Not confirmed sales or verified local prices.")
 
 
 def select_evidence(report, response, retrieved_at):
@@ -117,16 +165,14 @@ def select_evidence(report, response, retrieved_at):
         reason = (None if eligible else "unsupported_price" if not supported else
                   "not_comparable" if not listing.comparable or not listing.single_item else
                   "not_local_pickup" if listing.market != "local_pickup" else "zero_price")
+        national_reason = national_exclusion_reason(listing, supported)
         listings.append(dict(title=listing.title, url=url, price=float(listing.price), currency="USD",
                              source=parsed.hostname.lower(), condition=listing.condition,
+                             condition_type=listing.condition_type, price_basis=listing.price_basis,
                              market=listing.market, location=listing.location,
                              retrieved_at=retrieved_at, price_type="asking", eligible=eligible,
-                             exclusion_reason=reason, supporting_quotes=citations.get(url, [])))
+                             exclusion_reason=reason, supporting_quotes=citations.get(url, []),
+                             national_eligible=national_reason is None, national_exclusion_reason=national_reason))
         if eligible:
             prices.append(listing.price)
-    if len(prices) < 3:
-        return listings, None
-    return listings, dict(low=float(quartile(prices, Decimal(".25"))),
-                          high=float(quartile(prices, Decimal(".75"))),
-                          source="online_asking_prices", eligible_count=len(prices),
-                          method="linear_quartiles_v1", label="Similar items listed online; not confirmed sales or verified nearby prices")
+    return listings, price_range(prices, "Similar items listed online; not confirmed sales or verified nearby prices")

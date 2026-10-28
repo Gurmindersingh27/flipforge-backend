@@ -46,6 +46,17 @@ def provider_response(prices=(65, 75, 90)):
                                 cited_text=f'Used wood chair ${row["price"]}, local pickup.') for row in listings])])
 
 
+def national_response(prices=(100, 200, 300)):
+    raw = provider_response(prices)
+    report = json.loads(raw["content"][0]["text"])
+    for row in report["listings"]:
+        row.update(market="national_shipping", condition_type="used", price_basis="item_only")
+    raw["content"][0]["text"] = json.dumps(report)
+    for citation, row in zip(raw["content"][0]["citations"], report["listings"]):
+        citation["cited_text"] = f'Used wood chair ${row["price"]}, plus shipping.'
+    return raw
+
+
 def search_response():
     """Synthetic wire shape, not a recording of the real furniture run."""
     raw = provider_response()
@@ -602,7 +613,8 @@ class AssessmentTests(unittest.TestCase):
             counts = db.get(ItemAssessment, result["id"]).usage["evidence_diagnostics"]
         self.assertEqual(counts, dict(blocked_listing_count=0, native_citation_count=3, accepted_citation_count=3,
             matched_url_count=3, verified_price_listing_count=3, near_miss_citation_count=0,
-            no_dollar_price_citation_count=0))
+            no_dollar_price_citation_count=0, national_unknown_condition_count=0,
+            national_unknown_price_basis_count=0))
         self.assertNotIn("evidence_diagnostics", json.dumps(result))
         with patch("app.services.item_assessment_service.call_provider") as provider:
             recovered = self.client.get('/api/items/assessments/' + result["id"])
@@ -737,7 +749,8 @@ class AssessmentTests(unittest.TestCase):
                 output_tokens_details={"thinking_tokens": 300}, evidence_diagnostics=dict(
                     blocked_listing_count=0, native_citation_count=3, accepted_citation_count=3, matched_url_count=3,
                     verified_price_listing_count=3, near_miss_citation_count=0,
-                    no_dollar_price_citation_count=0)))
+                    no_dollar_price_citation_count=0, national_unknown_condition_count=0,
+                    national_unknown_price_basis_count=0)))
             self.assertNotIn("private", json.dumps({"usage": record.usage, "result": record.result}))
 
     def test_thinking_at_output_cap_settles_failure_without_retry(self):
@@ -1032,6 +1045,244 @@ class AssessmentTests(unittest.TestCase):
         return dict(inputs={**assessed["result"]["inputs"], "repairs": 15}, assessment_id=assessed["id"],
                     assessment_confirmation=dict(repairs=[dict(job_id="sand_seat", materials_cost=15)],
                         resale_source="assessment", preset_acknowledged=True))
+
+    def national_save_body(self, assessed):
+        body = self.save_body(assessed)
+        body["request_id"] = str(uuid4())
+        body["inputs"].update(resale_low=150, resale_high=250)
+        body["assessment_confirmation"]["resale_source"] = "national_reference"
+        return body
+
+    def test_national_reference_does_not_fill_inputs_and_status_or_replay_is_free(self):
+        body = request_body()
+        assessed, call = self.run_assessment(body, national_response())
+        call.assert_called_once()
+        self.assertEqual(assessed["status"], "completed")
+        evidence = assessed["result"]
+        self.assertIsNone(evidence["resale"])
+        self.assertEqual((evidence["national_resale"]["low"], evidence["national_resale"]["high"],
+                          evidence["national_resale"]["eligible_count"]), (150, 250, 3))
+        for field in ("resale_low", "resale_high", "repairs"):
+            self.assertIsNone(evidence["inputs"][field])
+            self.assertIn(field, evidence["analysis_result"]["missing_inputs"])
+        self.assertIsNone(evidence["analysis_result"]["low"])
+        self.assertEqual(evidence["preset"]["id"], "local_cash_v1")
+        self.assertEqual(evidence["repair_catalog_version"], VERSION)
+        self.assertEqual(evidence["repair_suggestions"][0]["materials_cost"], 15)
+        self.assertIn("What do you think it'd sell for?", evidence["questions"])
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            self.assertEqual(self.client.get('/api/items/assessments/' + assessed["id"]).json(), assessed)
+            self.assertEqual(self.client.post('/api/items/assess', json=body).json(), assessed)
+            provider.assert_not_called()
+        with self.Session() as db:
+            self.assertEqual(db.query(ItemAssessment).count(), 1)
+            self.assertEqual(db.query(SavedItem).count(), 0)
+
+    def test_national_unknown_diagnostics_are_private_settled_and_not_rewritten_on_reads(self):
+        raw, body = national_response(), request_body()
+        report = json.loads(raw["content"][0]["text"])
+        report["listings"][0].update(condition_type="unknown", price_basis="unknown")
+        report["listings"][1]["price_basis"] = "unknown"
+        report["listings"][2]["condition_type"] = "unknown"
+        raw["content"][0]["text"] = json.dumps(report)
+        assessed, call = self.run_assessment(body, raw)
+        call.assert_called_once()
+        self.assertEqual((assessed["status"], assessed["actual_cost"]), ("completed", .054))
+        self.assertIsNone(assessed["result"]["national_resale"])
+        self.assertEqual([row["national_exclusion_reason"] for row in assessed["result"]["listings"]],
+                         ["condition_unknown", "price_basis_unknown", "condition_unknown"])
+        with self.Session() as db:
+            usage = copy.deepcopy(db.get(ItemAssessment, assessed["id"]).usage)
+        counts = usage["evidence_diagnostics"]
+        self.assertEqual(counts["national_unknown_condition_count"], 2)
+        self.assertEqual(counts["national_unknown_price_basis_count"], 2)
+        self.assertTrue(all(type(value) is int for value in counts.values()))
+        self.assertNotIn("https", json.dumps(counts))
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            recovered = self.client.get('/api/items/assessments/' + assessed["id"]).json()
+            self.assertEqual(recovered, assessed)
+            self.assertEqual(self.client.post('/api/items/assess', json=body).json(), assessed)
+            provider.assert_not_called()
+        for key in ("evidence_diagnostics", "national_unknown_condition_count", "national_unknown_price_basis_count"):
+            self.assertNotIn(key, json.dumps(recovered))
+            self.assertNotIn(key, json.dumps(self.client.get('/openapi.json').json()))
+        with self.Session() as db:
+            from app.db.models.item_ai_budget import ItemAIMonth
+            record = db.get(ItemAssessment, assessed["id"])
+            self.assertEqual(record.usage, usage)
+            self.assertEqual(record.actual_micros, 54000)
+            self.assertEqual(db.get(ItemAIMonth, record.month).spent_micros, 54000)
+        status = self.client.get('/api/items/ai-budget').json()
+        # BudgetResponse is displayed to cents; exact settlement is checked above.
+        self.assertEqual((status["spent"], status["reserved"]), (.05, 0))
+
+    def test_national_save_replay_reopen_and_edits_preserve_owner_and_snapshot_provenance(self):
+        assessed, _ = self.run_assessment(raw=national_response())
+        body = self.national_save_body(assessed)
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            response = self.client.post('/api/items/save', json=body)
+            self.assertEqual(response.status_code, 201, response.text)
+            original = response.json()
+            self.assertEqual((original["inputs"]["resale_low"], original["inputs"]["resale_high"]), (150, 250))
+            self.assertEqual(original["assessment"]["confirmation"]["resale_source"], "national_reference")
+            self.assertEqual(original["assessment"]["evidence"], assessed["result"])
+            self.assertEqual(self.client.post('/api/items/save', json=body).json(), original)
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}').json(), original)
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}', headers={"X-Test-User": "bob"}).status_code, 404)
+            other_owner = {**body, "request_id": str(uuid4())}
+            self.assertEqual(self.client.post('/api/items/save', json=other_owner,
+                                             headers={"X-Test-User": "bob"}).status_code, 404)
+            with self.Session() as db:
+                self.assertEqual(db.query(SavedItem).count(), 1)
+                self.assertEqual(db.query(SavedItemAssessment).count(), 1)
+
+            # Cost-only edits retain the national source; the original is immutable.
+            child_body = copy.deepcopy(body)
+            child_body.update(request_id=str(uuid4()), parent_item_id=original["id"], notes="Pickup cost changed")
+            child_body["inputs"]["pickup"] = 10
+            child_response = self.client.post('/api/items/save', json=child_body)
+            self.assertEqual(child_response.status_code, 201, child_response.text)
+            child = child_response.json()
+            self.assertEqual(child["root_item_id"], original["id"])
+            self.assertEqual(child["assessment"]["confirmation"]["resale_source"], "national_reference")
+            self.assertEqual(child["analysis_result"]["low"]["max_offer"], original["analysis_result"]["low"]["max_offer"] - 10)
+
+            edited_body = copy.deepcopy(child_body)
+            edited_body.update(request_id=str(uuid4()), parent_item_id=child["id"])
+            edited_body["inputs"].update(resale_low=140, resale_high=240)
+            edited_body["assessment_confirmation"]["resale_source"] = "user_estimate"
+            edited_response = self.client.post('/api/items/save', json=edited_body)
+            self.assertEqual(edited_response.status_code, 201, edited_response.text)
+            edited = edited_response.json()
+            self.assertEqual(edited["assessment"]["confirmation"]["resale_source"], "user_estimate")
+            self.assertEqual(edited["assessment"]["evidence"], original["assessment"]["evidence"])
+            for snapshot in (original, child, edited):
+                self.assertEqual(self.client.get(f'/api/items/{snapshot["id"]}').json(), snapshot)
+                self.assertEqual(self.client.post('/api/items/analyze', json=snapshot["inputs"]).json(), snapshot["analysis_result"])
+            provider.assert_not_called()
+
+    def test_national_source_rejects_changed_bounds_absent_range_and_local_precedence(self):
+        assessed, _ = self.run_assessment(raw=national_response())
+        body = self.national_save_body(assessed)
+        cases = []
+        for field, value in [("resale_low", 149.99), ("resale_high", 250.01),
+                             ("resale_low", None), ("resale_high", None)]:
+            case = copy.deepcopy(body)
+            case["inputs"][field] = value
+            cases.append(case)
+        case = copy.deepcopy(body)
+        case["assessment_confirmation"]["resale_source"] = "assessment"
+        cases.append(case)
+        case = copy.deepcopy(body)
+        case["assessment_confirmation"]["national_resale"] = assessed["result"]["national_resale"]
+        cases.append(case)
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            for case in cases:
+                self.assertEqual(self.client.post('/api/items/save', json=case).status_code, 422)
+            provider.assert_not_called()
+
+        # Missing/legacy reference, insufficient count, and a local range all reject
+        # a national label. These are isolated stored-fixture changes, never live data.
+        evidence = assessed["result"]
+        for mode in ("absent", "null", "short", "local"):
+            changed = copy.deepcopy(evidence)
+            if mode == "absent":
+                changed.pop("national_resale")
+            elif mode == "null":
+                changed["national_resale"] = None
+            elif mode == "short":
+                changed["national_resale"]["eligible_count"] = 2
+            else:
+                changed["resale"] = copy.deepcopy(changed["national_resale"])
+            with self.Session() as db:
+                db.get(ItemAssessment, assessed["id"]).result = changed
+                db.commit()
+            self.assertEqual(self.client.post('/api/items/save', json=body).status_code, 422, mode)
+        with self.Session() as db:
+            self.assertEqual(db.query(SavedItem).count(), 0)
+            self.assertEqual(db.query(SavedItemAssessment).count(), 0)
+
+    def test_pre_national_assessments_and_saved_contexts_keep_their_original_meaning(self):
+        body = request_body()
+        assessed, _ = self.run_assessment(body)
+        legacy = copy.deepcopy(assessed["result"])
+        legacy.pop("national_resale")
+        for row in legacy["listings"]:
+            for key in ("condition_type", "price_basis", "national_eligible", "national_exclusion_reason"):
+                row.pop(key)
+        with self.Session() as db:
+            record = db.get(ItemAssessment, assessed["id"])
+            record.result = copy.deepcopy(legacy)
+            db.commit()
+        save = self.save_body(assessed)
+        with patch("app.services.item_assessment_service.call_provider") as provider:
+            saved = self.client.post('/api/items/save', json=save)
+            self.assertEqual(saved.status_code, 201, saved.text)
+            original = saved.json()
+            self.assertEqual(original["assessment"]["evidence"], legacy)
+            self.assertEqual(original["assessment"]["confirmation"]["resale_source"], "assessment")
+            status = self.client.get('/api/items/assessments/' + assessed["id"]).json()
+            self.assertIsNone(status["result"]["national_resale"])
+            self.assertTrue(all(not row["national_eligible"] and row["national_exclusion_reason"] == "not_recorded"
+                                for row in status["result"]["listings"]))
+            self.assertEqual(self.client.post('/api/items/assess', json=body).json(), status)
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}').json(), original)
+            save["parent_item_id"] = original["id"]
+            save["assessment_confirmation"]["resale_source"] = "user_estimate"
+            # Equal values do not imply automatic provenance.
+            child = self.client.post('/api/items/save', json=save)
+            self.assertEqual(child.status_code, 201, child.text)
+            self.assertEqual(child.json()["assessment"]["confirmation"]["resale_source"], "user_estimate")
+            self.assertEqual(child.json()["assessment"]["evidence"], legacy)
+            self.assertEqual(self.client.get(f'/api/items/{original["id"]}').json(), original)
+            provider.assert_not_called()
+        with self.Session() as db:
+            self.assertEqual(db.get(ItemAssessment, assessed["id"]).result, legacy)
+
+    def test_national_contract_and_prompt_require_explicit_classifications_with_same_budget(self):
+        from app.item_assessment_models import ItemAssessmentRequest
+        from app.services.item_assessment_service import provider_request
+        payload = provider_request(ItemAssessmentRequest.model_validate(request_body()))
+        self.assertEqual(payload["model"], MODEL)
+        self.assertEqual(payload["max_tokens"], 4000)
+        self.assertEqual(payload["tools"][0]["max_uses"], 2)
+        self.assertEqual(payload["tools"][0]["blocked_domains"], list(BLOCKED_RETAIL_DOMAINS))
+        self.assertIn("do not infer used condition just because the site sells used goods", payload["system"])
+        self.assertIn("shipping_included for bundled or free shipping and unknown when unclear", payload["system"])
+        self.assertIn("Never subtract or estimate shipping", payload["system"])
+        contract = self.client.get('/openapi.json').json()["components"]["schemas"]
+        self.assertEqual(contract["AssessmentConfirmation"]["properties"]["resale_source"]["enum"],
+                         ["assessment", "user_estimate", "national_reference"])
+        self.assertNotIn("national_resale", contract["AssessmentResult"]["required"])
+        listing = contract["ListingEvidence"]
+        self.assertEqual(listing["properties"]["condition_type"]["default"], "unknown")
+        self.assertEqual(listing["properties"]["price_basis"]["default"], "unknown")
+        self.assertFalse(listing["properties"]["national_eligible"]["default"])
+        self.assertEqual(listing["properties"]["national_exclusion_reason"]["default"], "not_recorded")
+
+    def test_national_answer_at_token_cap_or_with_invalid_flags_settles_without_partial_evidence(self):
+        for mode in ("max_tokens", "condition_type", "price_basis"):
+            with self.subTest(mode=mode):
+                raw = national_response()
+                if mode == "max_tokens":
+                    raw["stop_reason"] = "max_tokens"
+                    raw["usage"]["output_tokens"] = 4000
+                    raw["content"][0]["text"] = "Used prices $100, $200, $300.\n" + ASSESSMENT_MARKER + "\n" + raw["content"][0]["text"]
+                else:
+                    report = json.loads(raw["content"][0]["text"])
+                    report["listings"][0][mode] = "private-invalid-classification"
+                    raw["content"][0]["text"] = json.dumps(report)
+                result, call = self.run_assessment(raw=raw)
+                call.assert_called_once()
+                self.assertEqual((result["status"], result["failure_code"], result["result"]),
+                                 ("failed", "unusable_answer", None))
+                self.assertEqual(result["actual_cost"], .084 if mode == "max_tokens" else .054)
+                with self.Session() as db:
+                    usage = db.get(ItemAssessment, result["id"]).usage
+                self.assertNotIn("evidence_diagnostics", usage)
+                self.assertEqual(usage["diagnostics"]["stage"], "stop_reason" if mode == "max_tokens" else "schema")
+                self.assertNotIn("private-invalid-classification", json.dumps(usage))
+                self.assertEqual(self.client.get('/api/items/ai-budget').json()["reserved"], 0)
 
     def test_draft1_assessment_and_saved_versions_keep_original_prices_and_evidence(self):
         # Simulate a pre-upgrade assessment and save. Draft1 charged all three
