@@ -428,6 +428,59 @@ class AssessmentTests(unittest.TestCase):
                 self.assertEqual(self.client.request(method, path, json=body,
                     headers={"Authorization": "Bearer invalid"}).status_code, 401)
 
+    def test_expired_auth_rejects_before_reservation_then_same_id_runs_once(self):
+        # Real JWT verification and real route dependencies; no auth override.
+        # Keys exist only in memory and the provider remains a free fixture.
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        from jose import jwt
+        from app.services.item_assessment_service import assess
+        del app.dependency_overrides[get_current_user_id]
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        private = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption())
+        public = key.public_key().public_bytes(serialization.Encoding.PEM,
+                                              serialization.PublicFormat.SubjectPublicKeyInfo)
+        now = datetime.now(timezone.utc)
+        expired = jwt.encode({"sub": "alice", "exp": now - timedelta(minutes=1)}, private, algorithm="RS256")
+        fresh = jwt.encode({"sub": "alice", "exp": now + timedelta(minutes=5)}, private, algorithm="RS256")
+        body = request_body()
+        routes = [("POST", "/api/items/assess", body), ("GET", "/api/items/ai-budget", None),
+                  ("GET", f'/api/items/assessments/{body["request_id"]}', None),
+                  ("GET", "/api/items", None), ("GET", "/api/items/1", None),
+                  ("POST", "/api/items/save", {"inputs": {}}),
+                  ("GET", "/api/items/1/outcomes", None), ("POST", "/api/items/1/outcomes", {}),
+                  ("GET", "/api/items/preferences", None), ("PUT", "/api/items/preferences", {})]
+        with patch("app.auth._jwks", public), \
+             patch("app.main.assess", wraps=assess) as handler, \
+             patch.object(budget, "reserve", wraps=budget.reserve) as reserve, \
+             patch("app.services.item_assessment_service.call_provider", return_value=provider_response()) as provider:
+            for method, path, payload in routes:
+                with self.subTest(method=method, path=path):
+                    response = self.client.request(method, path, json=payload,
+                                                   headers={"Authorization": f"Bearer {expired}"})
+                    self.assertEqual(response.status_code, 401, response.text)
+                    self.assertEqual(response.json()["detail"], "Token has expired.")
+            handler.assert_not_called()
+            reserve.assert_not_called()
+            provider.assert_not_called()
+            with self.Session() as db:
+                self.assertEqual(db.query(ItemAssessment).count(), 0)
+            response = self.client.post('/api/items/assess', json=body,
+                                        headers={"Authorization": f"Bearer {fresh}"})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["id"], body["request_id"])
+            self.assertEqual(response.json()["status"], "completed")
+            handler.assert_called_once()
+            reserve.assert_called_once()
+            provider.assert_called_once()
+            # Even an explicit same-ID replay returns the existing answer.
+            replay = self.client.post('/api/items/assess', json=body,
+                                      headers={"Authorization": f"Bearer {fresh}"})
+            self.assertEqual(replay.json(), response.json())
+            reserve.assert_called_once()
+            provider.assert_called_once()
+
     def test_ownership_read_404_and_no_photos_or_description_persisted(self):
         result, _ = self.run_assessment()
         self.assertEqual(self.client.get('/api/items/assessments/' + result["id"]).json(), result)
