@@ -1,13 +1,29 @@
 """Deterministic evidence selection and Decimal quartiles, never AI offer math."""
 from decimal import Decimal, ROUND_HALF_UP
+from posixpath import normpath
 import re
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+
+from pydantic import HttpUrl
 
 from app.saved_item_models import SaveItemRequest
 from app.item_assessment_models import clean_text
 
 
 BLOCKED_RETAIL_DOMAINS = ("homedepot.com", "wayfair.com", "lowes.com", "ikea.com", "walmart.com", "amazon.com")
+_EBAY_MARKETPLACES = (
+    "ebay.com", "ebay.at", "ebay.com.au", "ebay.be", "ebay.ca", "ebay.ch", "ebay.de",
+    "ebay.es", "ebay.fr", "ebay.co.uk", "ebay.com.hk", "ebay.ie", "ebay.it",
+    "ebay.com.my", "ebay.nl", "ebay.ph", "ebay.pl", "ebay.com.sg", "ebay.com.tw",
+)
+_EBAY_ITEM_PATH = re.compile(r"/itm/(?:(?P<title>[^/]+)/)?[1-9][0-9]*/?")
+_NAVIGATION_ROUTES = {
+    "aptdeco.com": r"catalog",
+    "chairish.com": r"collection",
+    "craigslist.org": r"(?:d/[^/]+/)?search",
+    "mercari.com": r"search|us/(?:search|shop|brand)",
+    "offerup.com": r"search|c|explore",
+}
 MIN_RANGE_LISTINGS = 3
 # These reasons follow the shared price/comparability/shipping gates. They let
 # optional diagnostics count BOTH unknown flags without repeating eligibility.
@@ -16,12 +32,31 @@ NATIONAL_CLASSIFICATION_REASONS = frozenset({
 })
 
 
+def _on_domain(host, domain):
+    return host == domain or host.endswith("." + domain)
+
+
 def blocked_listing_url(value):
     try:
-        host = urlsplit(canonical_url(value)).hostname.lower().rstrip(".")
+        # Use the browser-equivalent host and path only for classifying the route.
+        parsed = HttpUrl(canonical_url(value))
+        host = parsed.host.rstrip(".")
     except (ValueError, TypeError, AttributeError):
         return False  # Existing URL validation handles malformed URLs.
-    return any(host == domain or host.endswith("." + domain) for domain in BLOCKED_RETAIL_DOMAINS)
+    # The ebay.us share host redirects without exposing the destination item.
+    if any(_on_domain(host, domain) for domain in (*BLOCKED_RETAIL_DOMAINS, "ebay.us")):
+        return True
+    if any(_on_domain(host, domain) for domain in _EBAY_MARKETPLACES):
+        item = _EBAY_ITEM_PATH.fullmatch(parsed.path)
+        if not item:
+            return True
+        title = unquote(item["title"] or "")
+        return title in (".", "..") or "/" in title or "\\" in title
+    for domain, routes in _NAVIGATION_ROUTES.items():
+        if _on_domain(host, domain):
+            path = normpath("/" + unquote(parsed.path).lstrip("/")).lower()
+            return path == "/" or re.match(rf"/(?:{routes})(?:/|$)", path) is not None
+    return False
 
 
 DOLLAR_PRICE_PATTERN = re.compile(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])")
