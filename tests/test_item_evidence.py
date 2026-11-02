@@ -11,7 +11,7 @@ from app.item_models import ItemAnalyzeRequest
 from app.services.item_assessment_service import build_result
 from app.services.item_evidence_service import quartile, select_evidence, evidence_diagnostics, quote_supports_price
 from app.services.item_repair_catalog import suggestions
-from test_item_assessment import provider_response, request_body
+from test_item_assessment import national_response, provider_response, request_body
 
 
 class EvidenceTests(unittest.TestCase):
@@ -53,6 +53,85 @@ class EvidenceTests(unittest.TestCase):
             self.change_listing(raw, **updates)
             _, resale = self.evidence(raw)
             self.assertIsNone(resale)
+
+    def test_navigation_pages_cannot_supply_a_third_local_or_national_comp(self):
+        urls = (
+            "https://WWW.EBAY.COM./sch/i.html?_nkw=chair",
+            "https://%65bay.com/sch/i.html?_nkw=chair",
+            "https://www.ebay.co.uk/b/Office-Chairs/bn_123",
+            "https://ebay.com/?item=123456789012", "https://ebay.com/itm/",
+            "https://ebay.com/itm/chair", "https://ebay.com/itm/123456789012/more",
+            "https://ebay.com/itm/%2e%2e/123456789012", "https://ebay.us/m/example",
+            "https://atlanta.craigslist.org/search/fuo?query=chair",
+            "https://atlanta.craigslist.org/d/furniture/search/fua",
+            "https://atlanta.craigslist.org/?query=chair",
+            "https://offerup.com/search?q=chair", "https://offerup.com/c/furniture",
+            "https://offerup.com/explore/k/chair", "https://www.aptdeco.com/catalog/furniture",
+            "https://www.chairish.com/collection/chairs", "https://www.mercari.com/us/shop/chairs/",
+        )
+        body = ItemAssessmentRequest.model_validate(request_body())
+        for url in urls:
+            for response in (provider_response, national_response):
+                with self.subTest(url=url, pool=response.__name__):
+                    raw = response()
+                    self.change_listing(raw, url=url)
+                    raw["content"][0]["citations"][0]["url"] = url  # Exact URL and a quoted ask.
+                    counts = {}
+                    result = build_result(body, raw, counts)
+                    rows = result["listings"]
+                    self.assertEqual(len(rows), 2)
+                    self.assertNotIn(url, [row["url"] for row in rows])
+                    self.assertIsNone(result["resale"])
+                    self.assertIsNone(result["national_resale"])
+                    self.assertEqual(counts, {"blocked_listing_count": 1})
+                    diagnostics = evidence_diagnostics(raw, rows, **counts)
+                    self.assertEqual(diagnostics["verified_price_listing_count"], 2)
+
+    def test_direct_item_pages_still_require_the_exact_cited_url(self):
+        urls = (
+            "https://ebay.com/itm/123456789012?mkcid=1",
+            "https://www.ebay.com/itm/Used-Wood-Chair/123456789012/?var=99",
+            "https://www.ebay.com.au/itm/123456789012",
+            "https://atlanta.craigslist.org/atl/fuo/d/example-chair/1234567890.html",
+            "https://offerup.com/item/detail/example-chair",
+            "https://www.mercari.com/us/item/m12345678901/",
+            "https://www.aptdeco.com/product/catalog-chair",
+            "https://www.chairish.com/product/123456/example-chair",
+            "https://offerup.com/item/detail/example?ref=/search",
+            "https://atlanta.craigslist.org/fuo/d/search-chair/1234567890.html",
+            "https://ebay.com.example.org/listing/1", "https://example.org/search/one-chair",
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                raw = provider_response()
+                self.change_listing(raw, url=url)
+                citation = raw["content"][0]["citations"][0]
+                citation["url"] = url
+                rows, resale = self.evidence(raw)
+                self.assertEqual(rows[0]["url"], url)
+                self.assertEqual(resale["eligible_count"], 3)
+                citation["url"] = url + ("&" if "?" in url else "?") + "tracking=other"
+                rows, resale = self.evidence(raw)
+                self.assertEqual(rows[0]["exclusion_reason"], "unsupported_price")
+                self.assertIsNone(resale)
+
+    def test_tracked_item_can_complete_a_shipped_range_only_once(self):
+        body = ItemAssessmentRequest.model_validate(request_body())
+        url = "https://www.ebay.com/itm/123456789012"
+        raw = national_response()
+        self.change_listing(raw, url=url + "?ref=one")
+        raw["content"][0]["citations"][0]["url"] = url + "?ref=one"
+        result = build_result(body, raw)
+        self.assertIsNone(result["resale"])
+        self.assertEqual(result["national_resale"]["eligible_count"], 3)
+
+        report = json.loads(raw["content"][0]["text"])
+        report["listings"][1]["url"] = url + "?ref=two"
+        raw["content"][0]["text"] = json.dumps(report)
+        raw["content"][0]["citations"][1]["url"] = url + "?ref=two"
+        result = build_result(body, raw)
+        self.assertEqual(len(result["listings"]), 2)
+        self.assertIsNone(result["national_resale"])
 
     def test_national_unknown_sets_and_unrelated_items_are_not_local_comps(self):
         for updates in [dict(market="national_shipping"), dict(market="unknown"), dict(single_item=False), dict(comparable=False)]:
