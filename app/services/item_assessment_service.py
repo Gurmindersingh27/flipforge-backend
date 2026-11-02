@@ -102,6 +102,8 @@ def provider_request(body):
         "use shipping_included for bundled or free shipping and unknown when unclear. "
         "Never subtract or estimate shipping to manufacture an item-only price. "
         "Cite each price using web_search_result_location citations with the dollar price in cited_text. "
+        "Use the current asking price for that specific listed item and cite text that identifies the amount as its ask. "
+        "Never use retail price or MSRP, the seller's original cost, a delivery or shipping charge, or another item's price as the ask. "
         "Before the JSON, give at most one short evidence sentence per listing (at most 12), "
         "with native citations supporting the dollar prices. Use the exact cited URLs in listings. "
         f"Then put {ASSESSMENT_MARKER} exactly once on its own line, followed by one JSON object. "
