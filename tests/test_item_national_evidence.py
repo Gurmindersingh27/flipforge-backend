@@ -190,6 +190,17 @@ class NationalEvidenceTests(unittest.TestCase):
                 self.assertEqual(rows[0]["national_eligible"], accepted)
                 self.assertEqual(national is not None, accepted)
 
+    def test_shipped_used_listing_with_only_retail_price_is_unsupported(self):
+        raw = national_response()
+        raw["content"][0]["citations"][0]["cited_text"] = "Original list price: $100."
+        rows, local, national = self.select(raw)
+        self.assertEqual(rows[0]["exclusion_reason"], "unsupported_price")
+        self.assertEqual(rows[0]["national_exclusion_reason"], "unsupported_price")
+        self.assertEqual([r["national_eligible"] for r in rows], [False, True, True])
+        self.assertIsNone(local)
+        self.assertIsNone(national)
+        self.assertEqual(evidence_diagnostics(raw, rows)["verified_price_listing_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

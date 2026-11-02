@@ -26,6 +26,36 @@ def blocked_listing_url(value):
 
 DOLLAR_PRICE_PATTERN = re.compile(r"(?:\$|USD\s*)([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)(?![0-9]|\.[0-9])")
 
+# Match labels only in the gap around one dollar occurrence. A label from a
+# previous clause or a previous price must not classify the next amount.
+_CLAUSE_BREAK = re.compile(r"[,;!?()\n|—]|\.(?=\s|$)")
+_TO_AMOUNT = re.compile(
+    r"(?:\s+(?:and\s+handling|available|starting|starts?|fees?|charges?|costs?|price|"
+    r"at|from|of|for|is|will|be|an?|extra|additional))*[\s:~=-]*", re.I)
+_LEADING_LABEL = re.compile(
+    rf"""\b(?:
+        (?P<other>
+            retail(?:s|ed)? | msrp | originally | original\s+(?:(?:asking\s+)?price|cost|value) |
+            original(?=[\s:~=-]*$) | paid | bought | compare[\s-]+at | valued\s+at |
+            list[\s-]+price | new\s+for | for\s+reference |
+            (?:another|separate|other)\s+(?:item|listing|post) | fees? | deposits? |
+            was(?=(?:\s+(?:asking|price|priced|listed|at|for|about|around))*[\s:~=-]*$) |
+            (?:deliver(?:y|ed|s)?|ship(?:ping|s)?)(?={_TO_AMOUNT.pattern}$)
+        )\b(?:\s+(?:asking(?:\s+price)?|price)\b)? |
+        (?P<ask>asking\b | price\s*: | buy\s+it\s+now\b | now\b | obo\b | firm\b)
+            (?=(?:\s+(?:price|is|at|for|only|just|about|around))*[\s:~=-]*$)
+    )""", re.I | re.X)
+_TRAILING_LABEL = re.compile(
+    r"""^[ \t]*(?:\([ \t]*(?=[^()\n]*\)))?(?:
+        (?P<other>
+            retail | msrp | list[\s-]+price | originally | (?:was\s+the\s+)?original\s+(?:price|cost) |
+            new | fees? | deposits? |
+            (?:for\s+)?(?:shipping|delivery)(?!\s+(?:included|excluded|available|extra|separately)\b) |
+            (?:(?:shown|listed|sold)\s+(?:in|on)\s+|see\s+)(?:a\s+)?separate\s+(?:post|listing)
+        )\b | (?P<ask>obo|firm)\b
+    )""", re.I | re.X)
+
+
 def canonical_url(value):
     # Reuse the save-only safety rule; do not fetch user or provider URLs.
     value = SaveItemRequest.safe_listing_url(value)
@@ -53,14 +83,42 @@ def cited_sources(response):
     return sources
 
 
+def _trailing_price_label(gap, has_next_amount):
+    """Return this price's suffix and the text still available to the next price."""
+    label = _TRAILING_LABEL.match(gap)
+    if not label:
+        return None, gap
+    rest = gap[label.end():]
+    if has_next_amount and _TO_AMOUNT.fullmatch(rest):
+        # "$80 delivery starts at $15" labels only the next price. A bare
+        # intervening label is ambiguous, so both prices must account for it.
+        return (None if rest.strip() else label.lastgroup), gap
+    # "$15 shipping and $80" attaches "shipping" only to $15.
+    return label.lastgroup, rest
+
+
 def quote_supports_price(quotes, price):
-    # Require a dollar-denominated price in an actual provider citation, not
-    # merely a model-generated URL or a number copied from its JSON answer.
+    """Resolve one asking price across all the accepted excerpts for this URL."""
+    candidates, cued = set(), set()
     for quote in quotes:
-        for value in DOLLAR_PRICE_PATTERN.findall(quote):
-            if Decimal(value.replace(",", "")) == price:
-                return True
-    return False
+        # The split preserves the existing dollar/decimal boundaries, including
+        # commas inside prices. Even entries are the text between amounts.
+        parts = DOLLAR_PRICE_PATTERN.split(quote)
+        before = parts[0]
+        for i in range(1, len(parts), 2):
+            amount = Decimal(parts[i].replace(",", ""))
+            clause = _CLAUSE_BREAK.split(before.rstrip(" \t\r\n("))[-1]
+            leading = None
+            for label in _LEADING_LABEL.finditer(clause):
+                leading = label.lastgroup
+            trailing, before = _trailing_price_label(parts[i + 1], i + 2 < len(parts))
+            if "other" in (leading, trailing):
+                continue
+            candidates.add(amount)
+            if "ask" in (leading, trailing):
+                cued.add(amount)
+
+    return (cued or candidates) == {price}
 
 
 def evidence_diagnostics(response, listings, blocked_listing_count=0):

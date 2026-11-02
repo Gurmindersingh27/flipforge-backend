@@ -5,10 +5,13 @@ from decimal import Decimal
 from fractions import Fraction
 from itertools import combinations, permutations
 
-from app.item_assessment_models import ProviderAssessment
+from app.item_analysis_engine import analyze_item
+from app.item_assessment_models import ItemAssessmentRequest, ProviderAssessment
+from app.item_models import ItemAnalyzeRequest
+from app.services.item_assessment_service import build_result
 from app.services.item_evidence_service import quartile, select_evidence, evidence_diagnostics, quote_supports_price
 from app.services.item_repair_catalog import suggestions
-from test_item_assessment import provider_response
+from test_item_assessment import provider_response, request_body
 
 
 class EvidenceTests(unittest.TestCase):
@@ -94,6 +97,89 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(counts["matched_url_count"], 0)
         self.assertEqual(counts["verified_price_listing_count"], 0)
         self.assertIsNone(resale)
+
+    def test_price_labels_apply_to_individual_amounts(self):
+        # Invented excerpts. An empty accepted set means neither amount can be used.
+        examples = [
+            ("Like new $120", [120], [120]),
+            ("Brand new in box $120", [120], [120]),
+            ("$450, plus shipping", [450], [450]),
+            ("Buy It Now for $259.00", [259], [259]),
+            ("$120 + $25 shipping", [120, 25], [120]),
+            ("Retail $449.99, asking $120", [449.99, 120], [120]),
+            ("$120 (retails for $449.99)", [120, 449.99], [120]),
+            ("Paid $300 new, asking $120", [300, 120], [120]),
+            ("Delivery $25. $120", [25, 120], [120]),
+            ("Bookcase $120. Matching nightstand $40", [120, 40], []),
+            ("$120 $150", [120, 150], []),
+            ("$240 retail. $15 delivery. $80 new.", [240, 15, 80], []),
+            ("New for $185. List price: $200. MSRP $225.", [185, 200, 225], []),
+            ("Originally $230. Was $190. Now $115", [230, 190, 115], [115]),
+            ("Compare at $225. Valued at $200. Deposit $15. Fee $5.", [225, 200, 15, 5], []),
+            ("Bought the lamp for $180. Price: $75.", [180, 75], [75]),
+            ("For reference: the wider model is $230. $80 firm", [230, 80], [80]),
+            ("Desk $95 OBO. Stand $40 (see separate listing).", [95, 40], [95]),
+            ("$80 OBO. Lamp $35 firm.", [80, 35], []),
+            ("$120 delivery starts at $25", [120, 25], [120]),
+            ("Shipping and handling: $25", [25], []),
+            ("$25 shipping and $120", [25, 120], [120]),
+            ("$275 (MSRP). $120 originally.", [275, 120], []),
+            ("Chair was recently refinished $120", [120], [120]),
+            ("$220 retail $140", [220, 140], []),
+            ("The original asking price was $190. Now asking $125.", [190, 125], [125]),
+            ("Originally asking $160. Was asking $150.", [160, 150], []),
+        ]
+        for quote, prices, expected in examples:
+            with self.subTest(quote=quote):
+                accepted = [p for p in prices if quote_supports_price([quote], Decimal(str(p)))]
+                self.assertEqual(accepted, expected)
+
+    def test_all_quotes_for_one_url_must_resolve_to_one_ask(self):
+        for quotes, expected in [
+            (["Chair $95.", "Footrest $35."], []),
+            (["Chair $95.", "Chair $95.00."], [95]),
+            (["Chair $95.", "Chair $95 firm.", "Footrest $35."], [95]),
+            (["Asking $95.", "Price: $35."], []),
+            (["Paid $95.", "Asking $95."], [95]),
+        ]:
+            for order in (quotes, list(reversed(quotes))):
+                with self.subTest(quotes=order):
+                    self.assertEqual([p for p in (95, 35) if quote_supports_price(order, Decimal(p))], expected)
+
+    def test_verified_count_includes_supported_reference_only_rows(self):
+        raw = provider_response((86, 130, 24, 50))
+        report = json.loads(raw["content"][0]["text"])
+        report["listings"][1]["comparable"] = False
+        raw["content"][0]["text"] = json.dumps(report)
+        citations = raw["content"][0]["citations"]
+        citations[2]["cited_text"] = "Shipping fee: $24."
+        citations.append({**citations[3], "cited_text": "Side table $33."})
+        rows, _ = self.evidence(raw)
+        self.assertEqual([row["exclusion_reason"] for row in rows],
+                         [None, "not_comparable", "unsupported_price", "unsupported_price"])
+        counts = evidence_diagnostics(raw, rows)
+        self.assertEqual(counts["verified_price_listing_count"],
+                         sum(row["exclusion_reason"] != "unsupported_price" for row in rows))
+        self.assertEqual(counts["no_dollar_price_citation_count"], 0)
+
+    def test_retail_only_third_comp_cannot_supply_a_buying_ceiling(self):
+        def confirm_repairs(result):
+            return analyze_item(ItemAnalyzeRequest.model_validate({**result["inputs"], "repairs": 0}))
+
+        body = ItemAssessmentRequest.model_validate(request_body())
+        raw = provider_response((80, 100, 120))
+        result = build_result(body, raw)
+        self.assertEqual((result["resale"]["low"], result["resale"]["high"]), (90, 110))
+        self.assertEqual(confirm_repairs(result).low.max_offer, 60)
+
+        raw["content"][0]["citations"][2]["cited_text"] = "MSRP $120."
+        result = build_result(body, raw)
+        self.assertEqual([r["eligible"] for r in result["listings"]], [True, True, False])
+        self.assertIsNone(result["resale"])
+        self.assertIsNone(result["inputs"]["resale_low"])
+        decision = confirm_repairs(result)
+        self.assertEqual(decision.status, "needs_info")
+        self.assertIsNone(decision.low)
 
     def test_counts_distinguish_absent_near_miss_and_unpriced_citations(self):
         for mode, expected in [
