@@ -54,6 +54,66 @@ class EvidenceTests(unittest.TestCase):
             _, resale = self.evidence(raw)
             self.assertIsNone(resale)
 
+    def test_local_condition_changes_the_range_without_discarding_verified_asks(self):
+        prices = (160, 200, 240, 900)
+        cases = [
+            (("used", "used", "used"), 3),
+            (("used", "used", "new"), 2),
+            (("new", "new", "new"), 0),
+            (("unknown", "unknown", "unknown"), 3),
+            (("used", "used", "used", "new"), 3),
+        ]
+        for conditions, qualifying in cases:
+            with self.subTest(conditions=conditions):
+                asks = prices[:len(conditions)]
+                raw = provider_response(asks)
+                block = raw["content"][0]
+                report = json.loads(block["text"])
+                for listing, citation, condition in zip(report["listings"], block["citations"], conditions):
+                    listing.update(title="Chair", condition=condition, condition_type=condition)
+                    citation["cited_text"] = f'Chair asking ${listing["price"]}. Pickup available.'
+                block["text"] = json.dumps(report)
+                result = build_result(ItemAssessmentRequest.model_validate(request_body()), raw)
+                rows = result["listings"]
+                self.assertEqual([row["price"] for row in rows], list(asks))
+                self.assertEqual([row["supporting_quotes"] for row in rows],
+                                 [[citation["cited_text"]] for citation in block["citations"]])
+                self.assertEqual([row["exclusion_reason"] for row in rows],
+                                 ["condition_new" if condition == "new" else None for condition in conditions])
+                self.assertEqual([row["eligible"] for row in rows], [condition != "new" for condition in conditions])
+                self.assertEqual(sum(row["eligible"] for row in rows), qualifying)
+                self.assertEqual(evidence_diagnostics(raw, rows)["verified_price_listing_count"], len(asks))
+                self.assertIsNone(result["national_resale"])
+                if qualifying == 3:
+                    self.assertEqual((result["resale"]["low"], result["resale"]["high"],
+                                      result["resale"]["eligible_count"]), (180, 220, 3))
+                else:
+                    self.assertIsNone(result["resale"])
+                    self.assertIsNone(result["inputs"]["resale_low"])
+                    self.assertIsNone(result["inputs"]["resale_high"])
+
+    def test_new_condition_follows_other_local_exclusions_and_keeps_national_verdicts(self):
+        cases = [
+            (160, {}, False, "unsupported_price", "unsupported_price"),
+            (160, {"comparable": False}, True, "not_comparable", "not_comparable"),
+            (160, {"single_item": False}, True, "not_comparable", "not_comparable"),
+            (160, {"market": "unknown"}, True, "not_local_pickup", "not_shipped"),
+            (160, {"market": "national_shipping", "price_basis": "item_only"}, True, "not_local_pickup", "condition_new"),
+            (0, {}, True, "zero_price", "zero_price"),
+            (0, {"market": "national_shipping"}, True, "not_local_pickup", "zero_price"),
+        ]
+        for price, updates, supported, local, national in cases:
+            with self.subTest(price=price, updates=updates, supported=supported):
+                raw = provider_response((price,))
+                self.change_listing(raw, title="Chair", condition="New", condition_type="new", **updates)
+                raw["content"][0]["citations"][0]["cited_text"] = f"Asking ${price}." if supported else "Chair available."
+                rows, resale = self.evidence(raw)
+                row, = rows
+                self.assertEqual((row["eligible"], row["exclusion_reason"]), (False, local))
+                self.assertEqual((row["national_eligible"], row["national_exclusion_reason"]), (False, national))
+                self.assertEqual(evidence_diagnostics(raw, rows)["verified_price_listing_count"], int(supported))
+                self.assertIsNone(resale)
+
     def test_navigation_pages_cannot_supply_a_third_local_or_national_comp(self):
         urls = (
             "https://WWW.EBAY.COM./sch/i.html?_nkw=chair",

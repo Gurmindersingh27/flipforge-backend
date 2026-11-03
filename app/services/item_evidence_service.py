@@ -236,6 +236,21 @@ def national_reference(listings, local_resale):
     return price_range(prices, "National used asking prices; shipping excluded. Not confirmed sales or verified local prices.")
 
 
+def local_exclusion_reason(listing, supported):
+    """Pickup listings with unconfirmed condition can qualify for the local range."""
+    if not supported:
+        return "unsupported_price"
+    if not listing.comparable or not listing.single_item:
+        return "not_comparable"
+    if listing.market != "local_pickup":
+        return "not_local_pickup"
+    if listing.price <= 0:
+        return "zero_price"
+    if listing.condition_type == "new":
+        return "condition_new"
+    return None
+
+
 def select_evidence(report, response, retrieved_at):
     citations = cited_sources(response)
     listings, prices, seen = [], [], set()
@@ -253,11 +268,8 @@ def select_evidence(report, response, retrieved_at):
             continue
         seen.add(key)
         supported = url in citations and quote_supports_price(citations[url], listing.price)
-        eligible = (supported and listing.price > 0 and listing.comparable and listing.single_item
-                    and listing.market == "local_pickup")
-        reason = (None if eligible else "unsupported_price" if not supported else
-                  "not_comparable" if not listing.comparable or not listing.single_item else
-                  "not_local_pickup" if listing.market != "local_pickup" else "zero_price")
+        reason = local_exclusion_reason(listing, supported)
+        eligible = reason is None
         national_reason = national_exclusion_reason(listing, supported)
         listings.append(dict(title=listing.title, url=url, price=float(listing.price), currency="USD",
                              source=parsed.hostname.lower(), condition=listing.condition,
