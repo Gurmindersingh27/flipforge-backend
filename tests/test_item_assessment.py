@@ -82,6 +82,28 @@ def search_response():
     return raw
 
 
+def listing_search_response(rows):
+    """One cited item per search round, followed by the provider's final report."""
+    raw = provider_response([price for price, _, _ in rows])
+    report = json.loads(raw["content"][0]["text"])
+    blocks = []
+    for index, (listing, (_, market, excerpt)) in enumerate(zip(report["listings"], rows)):
+        url = f"https://atlanta.craigslist.org/atl/fuo/d/fixture-chair/{7000000000 + index}.html"
+        listing.update(url=url, market=market, condition_type="used", price_basis="item_only")
+        tool_id = f"search_{index + 1}"
+        blocks.extend([
+            dict(type="server_tool_use", id=tool_id, name="web_search", input={"query": "used chair Atlanta"}),
+            dict(type="web_search_tool_result", tool_use_id=tool_id, content=[
+                dict(type="web_search_result", url=url, title=listing["title"], encrypted_content="fixture")]),
+            dict(type="text", text="Search evidence. ", citations=[
+                dict(type="web_search_result_location", url=url, cited_text=excerpt)]),
+        ])
+    blocks.append(dict(type="text", text=ASSESSMENT_MARKER + "\n" + json.dumps(report)))
+    raw["content"] = blocks
+    raw["usage"]["server_tool_use"]["web_search_requests"] = len(rows)
+    return raw
+
+
 class AssessmentTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
@@ -226,7 +248,7 @@ class AssessmentTests(unittest.TestCase):
                 self.assertNotIn("allowed_domains", tool)
                 self.assertEqual(tool["blocked_domains"], ["homedepot.com", "wayfair.com", "lowes.com", "ikea.com", "walmart.com", "amazon.com"])
                 self.assertTrue(all("/" not in d and ":" not in d for d in tool["blocked_domains"]))
-                self.assertEqual(tool["max_uses"], 2)
+                self.assertEqual(tool["max_uses"], 3)
 
     def test_blocked_listing_count_internal_and_settled(self):
         raw = provider_response()
@@ -261,7 +283,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertFalse(evidence["repair_suggestions"][0]["confirmed"])
         payload = call.call_args.args[0]
         self.assertEqual(payload["model"], MODEL)
-        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
+        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
         self.assertEqual(payload["max_tokens"], 4000)
         self.assertEqual(payload["thinking"], {"type": "between_tools"})
         self.assertEqual(payload["output_config"], {"effort": "medium"})
@@ -335,7 +357,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("Put work outside these scopes", prompt)
         self.assertIn("Never calculate resale ranges, offers, profits, costs, or buy/pass decisions", prompt)
         self.assertEqual(payload["max_tokens"], 4000)
-        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
+        self.assertEqual(payload["tools"], [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "blocked_domains": list(BLOCKED_RETAIL_DOMAINS)}])
         self.assertEqual(payload["model"], "claude-sonnet-5-5")
 
     def test_overlap_returns_unknown_empty_budget_and_saves_one_custom_total_with_evidence(self):
@@ -708,6 +730,40 @@ class AssessmentTests(unittest.TestCase):
         self.assertEqual(raw, original)
         with self.Session() as db:
             self.assertNotIn("diagnostics", db.get(ItemAssessment, result["id"]).usage)
+
+    def test_optional_third_search_preserves_pickup_proof_and_charges_for_actual_use(self):
+        pickup = [(p, "local_pickup", f"Used chair. Asking ${p}. Pickup in Atlanta.") for p in (160, 200, 240)]
+        shipped = [(p, "national_shipping", f"Used chair. Asking ${p}. Ships only. No pickup.") for p in (160, 200, 240)]
+        cases = [
+            # Rows, verified asks, eligible pickup rows, last local exclusion, optional shipped range.
+            (pickup[:2], 2, 2, None, False),
+            (pickup, 3, 3, None, False),
+            (pickup[:2] + [(325, "unknown", "Used chair. Asking $325. Atlanta.")], 3, 2, "not_local_pickup", False),
+            (pickup[:2] + [(240, "local_pickup", "Used chair. Pickup in Atlanta.")], 2, 2, "unsupported_price", False),
+            (shipped, 3, 0, "not_local_pickup", True),
+        ]
+        for rows, verified, qualifying, reason, has_shipped_range in cases:
+            with self.subTest(rows=rows):
+                result, call = self.run_assessment(request_body(location="Atlanta, GA"), listing_search_response(rows))
+                call.assert_called_once()
+                self.assertEqual(result["status"], "completed")
+                evidence = result["result"]
+                self.assertEqual(sum(row["eligible"] for row in evidence["listings"]), qualifying)
+                self.assertEqual(evidence["listings"][-1]["exclusion_reason"], reason)
+                self.assertEqual([evidence["inputs"][k] for k in ("resale_low", "resale_high")],
+                                 [180, 220] if qualifying == 3 else [None, None])
+                self.assertEqual(evidence["resale"] is not None, qualifying == 3)
+                self.assertEqual(evidence["national_resale"] is not None, has_shipped_range)
+                if has_shipped_range:
+                    national = evidence["national_resale"]
+                    self.assertEqual((national["eligible_count"], national["low"], national["high"]), (3, 180, 220))
+                expected_micros = 54000 if len(rows) == 2 else 64000
+                self.assertEqual(result["actual_cost"], expected_micros / 1_000_000)
+                with self.Session() as db:
+                    record = db.get(ItemAssessment, result["id"])
+                    self.assertEqual(record.actual_micros, expected_micros)
+                    self.assertEqual(record.usage["web_search_requests"], len(rows))
+                    self.assertEqual(record.usage["evidence_diagnostics"]["verified_price_listing_count"], verified)
 
     def test_no_search_plain_and_fenced_json_keep_existing_result(self):
         now = datetime(2026, 10, 19, tzinfo=timezone.utc)
@@ -1245,8 +1301,12 @@ class AssessmentTests(unittest.TestCase):
         payload = provider_request(ItemAssessmentRequest.model_validate(request_body()))
         self.assertEqual(payload["model"], MODEL)
         self.assertEqual(payload["max_tokens"], 4000)
-        self.assertEqual(payload["tools"][0]["max_uses"], 2)
+        self.assertEqual(payload["tools"][0]["max_uses"], 3)
         self.assertEqual(payload["tools"][0]["blocked_domains"], list(BLOCKED_RETAIL_DOMAINS))
+        self.assertIn("at most 3 web searches", payload["system"])
+        self.assertIn("fewer than 3 distinct used pickup listings have cited asks", payload["system"])
+        self.assertIn("individual used-item pages in the supplied area", payload["system"])
+        self.assertIn("quoted asking price and explicit pickup terms", payload["system"])
         self.assertIn("do not infer used condition just because the site sells used goods", payload["system"])
         self.assertIn("shipping_included for bundled or free shipping and unknown when unclear", payload["system"])
         self.assertIn("Never subtract or estimate shipping", payload["system"])
