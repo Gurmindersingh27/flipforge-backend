@@ -72,6 +72,9 @@ _LEADING_LABEL = re.compile(
         (?P<other>
             retail(?:s|ed)? | msrp | originally | original\s+(?:(?:asking\s+)?price|cost|value) |
             original(?=[\s:~=-]*$) | paid | bought | compare[\s-]+at | valued\s+at |
+            spent | cost\s+me | got\s+(?:it|this|one|mine)(?:\s+new)?\s+for |
+            picked\s+(?:it|this|one|mine)\s+up(?:\s+new)?\s+for |
+            (?<!\bbe\s)(?:purchased|picked\s+up(?:\s+new)?\s+for) |
             list[\s-]+price | new\s+for | for\s+reference |
             (?:another|separate|other)\s+(?:item|listing|post) | fees? | deposits? |
             was(?=(?:\s+(?:asking|price|priced|listed|at|for|about|around))*[\s:~=-]*$) |
@@ -144,7 +147,8 @@ def quote_supports_price(quotes, price):
             amount = Decimal(parts[i].replace(",", ""))
             clause = _CLAUSE_BREAK.split(before.rstrip(" \t\r\n("))[-1]
             leading = None
-            for label in _LEADING_LABEL.finditer(clause):
+            # Treat "be picked up" and "be  picked up" alike in listing excerpts.
+            for label in _LEADING_LABEL.finditer(" ".join(clause.split())):
                 leading = label.lastgroup
             trailing, before = _trailing_price_label(parts[i + 1], i + 2 < len(parts))
             if "other" in (leading, trailing):

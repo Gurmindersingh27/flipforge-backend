@@ -11,7 +11,7 @@ from app.item_models import ItemAnalyzeRequest
 from app.services.item_assessment_service import build_result
 from app.services.item_evidence_service import quartile, select_evidence, evidence_diagnostics, quote_supports_price
 from app.services.item_repair_catalog import suggestions
-from test_item_assessment import national_response, provider_response, request_body
+from test_item_assessment import listing_search_response, national_response, provider_response, request_body
 
 
 class EvidenceTests(unittest.TestCase):
@@ -256,6 +256,19 @@ class EvidenceTests(unittest.TestCase):
             ("Originally $230. Was $190. Now $115", [230, 190, 115], [115]),
             ("Compare at $225. Valued at $200. Deposit $15. Fee $5.", [225, 200, 15, 5], []),
             ("Bought the lamp for $180. Price: $75.", [180, 75], [75]),
+            ("Purchased for $400.", [400], []),
+            ("Cost me $400.", [400], []),
+            ("I spent $400 on it.", [400], []),
+            ("Got mine for $400.", [400], []),
+            ("Got this new for $400.", [400], []),
+            ("I picked it up for $400.", [400], []),
+            ("I picked one up new for $400.", [400], []),
+            ("Picked up for $400 last year.", [400], []),
+            ("You can pick it up for $240.", [240], [240]),
+            ("Can be picked up for $240 in Decatur.", [240], [240]),
+            ("Can be  picked up for $240 in Decatur.", [240], [240]),
+            ("Can be purchased for $240.", [240], [240]),
+            ("I got it for $400. Selling for $240.", [400, 240], [240]),
             ("For reference: the wider model is $230. $80 firm", [230, 80], [80]),
             ("Desk $95 OBO. Stand $40 (see separate listing).", [95, 40], [95]),
             ("$80 OBO. Lamp $35 firm.", [80, 35], []),
@@ -300,6 +313,34 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(counts["verified_price_listing_count"],
                          sum(row["exclusion_reason"] != "unsupported_price" for row in rows))
         self.assertEqual(counts["no_dollar_price_citation_count"], 0)
+
+    def test_purchase_history_and_current_ask_drive_different_local_decisions(self):
+        body = ItemAssessmentRequest.model_validate(request_body(description="Used chair", asking_price=None))
+        first_two = [(price, "local_pickup", f"Used chair. Asking ${price}. Local pickup.") for price in (160, 200)]
+        for price, quote, reason in [
+            (400, "I got it for $400.", "unsupported_price"),
+            (240, "I got it for $400. Selling for $240.", None),
+        ]:
+            with self.subTest(quote=quote):
+                raw = listing_search_response(first_two + [(price, "local_pickup", f"Used chair. {quote} Local pickup.")])
+                result = build_result(body, raw)
+                rows = result["listings"]
+                self.assertEqual(rows[2]["exclusion_reason"], reason)
+                self.assertEqual([row["eligible"] for row in rows], [True, True, reason is None])
+                self.assertEqual(evidence_diagnostics(raw, rows)["verified_price_listing_count"], 2 if reason else 3)
+                self.assertIsNone(result["national_resale"])
+                inputs = result["inputs"]
+                decision = analyze_item(ItemAnalyzeRequest.model_validate({**inputs, "repairs": 5, "pickup": 20}))
+                if reason:
+                    self.assertIsNone(result["resale"])
+                    self.assertEqual((inputs["resale_low"], inputs["resale_high"]), (None, None))
+                    self.assertEqual(decision.status, "needs_info")
+                    self.assertIsNone(decision.low)
+                else:
+                    resale = result["resale"]
+                    self.assertEqual((resale["low"], resale["high"], resale["eligible_count"]), (180, 220, 3))
+                    self.assertEqual((inputs["resale_low"], inputs["resale_high"]), (180, 220))
+                    self.assertEqual((decision.status, decision.low.max_offer), ("offer_only", 124))
 
     def test_retail_only_third_comp_cannot_supply_a_buying_ceiling(self):
         def confirm_repairs(result):
