@@ -3,9 +3,10 @@ import copy
 import json
 import unittest
 
-from app.item_assessment_models import ListingEvidence, ProviderAssessment
+from app.item_assessment_models import ItemAssessmentRequest, ListingEvidence, ProviderAssessment
+from app.services.item_assessment_service import build_result
 from app.services.item_evidence_service import evidence_diagnostics, national_reference, select_evidence
-from test_item_assessment import national_response, provider_response
+from test_item_assessment import national_response, provider_response, request_body
 
 
 class NationalEvidenceTests(unittest.TestCase):
@@ -189,6 +190,29 @@ class NationalEvidenceTests(unittest.TestCase):
                 rows, _, national = self.select(raw)
                 self.assertEqual(rows[0]["national_eligible"], accepted)
                 self.assertEqual(national is not None, accepted)
+
+    def test_purchase_history_cannot_supply_a_third_shipped_ask(self):
+        body = ItemAssessmentRequest.model_validate(request_body(description="Used chair", asking_price=None))
+        for price, quote, reason in [
+            (400, "I got it for $400.", "unsupported_price"),
+            (240, "I got it for $400. Selling for $240.", None),
+        ]:
+            with self.subTest(quote=quote):
+                raw = national_response((160, 200, price))
+                raw["content"][0]["citations"][2]["cited_text"] = f"Used chair. {quote} Ships separately."
+                result = build_result(body, raw)
+                rows = result["listings"]
+                self.assertEqual(rows[2]["national_exclusion_reason"], reason)
+                self.assertEqual(rows[2]["exclusion_reason"], reason or "not_local_pickup")
+                self.assertEqual([row["national_eligible"] for row in rows], [True, True, reason is None])
+                self.assertEqual(evidence_diagnostics(raw, rows)["verified_price_listing_count"], 2 if reason else 3)
+                self.assertIsNone(result["resale"])
+                self.assertEqual((result["inputs"]["resale_low"], result["inputs"]["resale_high"]), (None, None))
+                national = result["national_resale"]
+                if reason:
+                    self.assertIsNone(national)
+                else:
+                    self.assertEqual((national["low"], national["high"], national["eligible_count"]), (180, 220, 3))
 
     def test_shipped_used_listing_with_only_retail_price_is_unsupported(self):
         raw = national_response()
