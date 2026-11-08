@@ -26,6 +26,8 @@ from .saved_item_models import SaveItemRequest, SavedItemResponse, SavedItemList
 from .services.saved_item_service import save_item, list_items, owned_item, item_response
 from .item_outcome_models import SaveItemOutcomeRequest, ItemOutcomeResponse
 from .services.item_outcome_service import save_outcome, latest_outcome
+from .item_project_models import ItemProjectListResponse, ItemProjectResponse
+from .services.item_project_service import list_projects, get_project
 from .item_preference_models import SaveItemPreferencesRequest, ItemPreferencesResponse
 from .services.item_preference_service import get_preferences, save_preferences
 from .services.url_service import draft_from_url
@@ -164,6 +166,25 @@ def save_item_preferences_endpoint(
     db: Session = Depends(get_db),
 ):
     return save_preferences(db, user_id, body)
+
+
+@app.get("/api/items/projects", response_model=ItemProjectListResponse)
+def list_item_projects_endpoint(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return list_projects(db, user_id, limit, offset)
+
+
+@app.get("/api/items/{root_item_id}/project", response_model=ItemProjectResponse)
+def get_item_project_endpoint(
+    root_item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return get_project(db, user_id, root_item_id)
 
 
 @app.get("/api/items/{item_id}", response_model=SavedItemResponse)
