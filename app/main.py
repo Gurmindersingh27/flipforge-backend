@@ -26,6 +26,8 @@ from .saved_item_models import SaveItemRequest, SavedItemResponse, SavedItemList
 from .services.saved_item_service import save_item, list_items, owned_item, item_response
 from .item_outcome_models import SaveItemOutcomeRequest, ItemOutcomeResponse
 from .services.item_outcome_service import save_outcome, latest_outcome
+from .item_inspection_models import SaveItemInspectionRequest, ItemInspectionResponse
+from .services.item_inspection_service import save_inspection, latest_inspection
 from .item_project_models import ItemProjectListResponse, ItemProjectResponse
 from .services.item_project_service import list_projects, get_project
 from .item_preference_models import SaveItemPreferencesRequest, ItemPreferencesResponse
@@ -149,6 +151,25 @@ def get_item_outcome_endpoint(
     db: Session = Depends(get_db),
 ):
     return latest_outcome(db, user_id, root_item_id)
+
+
+@app.post("/api/items/{root_item_id}/inspections", response_model=ItemInspectionResponse, status_code=201)
+def save_item_inspection_endpoint(
+    body: SaveItemInspectionRequest,
+    root_item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return save_inspection(db, user_id, root_item_id, body)
+
+
+@app.get("/api/items/{root_item_id}/inspections", response_model=ItemInspectionResponse | None)
+def get_item_inspection_endpoint(
+    root_item_id: int = Path(gt=0),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    return latest_inspection(db, user_id, root_item_id)
 
 
 @app.get("/api/items/preferences", response_model=ItemPreferencesResponse | None)
